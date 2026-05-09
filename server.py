@@ -1,7 +1,7 @@
 import asyncio
 import json
 import threading
-from queue import Queue, Empty
+from queue import Queue
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import run_agent
+from agent import run_planner
 
 app = FastAPI(title="TravelMind")
 
@@ -39,30 +39,21 @@ async def plan(req: PlanRequest):
     queue: Queue = Queue()
     SENTINEL = object()
 
-    def on_tool_call(query: str):
-        queue.put(("tool_call", {"query": query}))
-
-    def on_tool_result(query: str, summary: str):
-        queue.put(("tool_result", {"query": query, "summary": summary}))
+    def on_event(event_type: str, payload: dict):
+        queue.put((event_type, payload))
 
     def worker():
         try:
-            plan_text, calls = run_agent(
+            summary = run_planner(
                 user_query=req.query,
                 gemini_key=req.gemini_key,
                 tavily_key=req.tavily_key,
-                on_tool_call=on_tool_call,
-                on_tool_result=on_tool_result,
+                on_event=on_event,
             )
-            sources_total = sum(c.get("sources_count", 0) for c in calls)
-            queue.put((
-                "done",
-                {
-                    "plan": plan_text,
-                    "searches": len(calls),
-                    "sources": sources_total,
-                },
-            ))
+            queue.put(("done", {
+                "searches": summary["total_searches"],
+                "sources": summary["total_sources"],
+            }))
         except Exception as e:
             queue.put(("error", {"message": str(e)}))
         finally:

@@ -1,44 +1,91 @@
+"""TravelMind multi-agent core.
+
+Orchestrator (PlannerAgent) dispatches three specialist sub-agents in parallel:
+FlightAgent, HotelAgent, ItineraryAgent. Each sub-agent runs its own Gemini
+function-calling loop with a Tavily web_search tool, then returns a markdown
+section. The Planner finally synthesizes the sections into a unified plan.
+"""
+
+from __future__ import annotations
+
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
 from google import genai
 from google.genai import types
 
-SYSTEM_PROMPT = """You are TravelMind, an expert AI travel planning agent. When given a travel request, you MUST:
-
-1. Search for flight options (origin → destination, approximate costs, airlines)
-2. Search for hotel/accommodation options within the stated budget
-3. Search for top attractions and activities at the destination
-4. Search for local food/restaurant recommendations
-5. Search for weather and best time to visit tips
-6. Synthesize everything into a detailed, actionable travel plan
-
-Rules:
-- Always make AT LEAST 4 separate searches before writing the final plan
-- Each search should be targeted and specific (e.g. "Boston to Tokyo flights July 2025 price")
-- After all searches, produce a structured response with:
-  * ✈️ Flight Options (estimated costs, airlines, duration)
-  * 🏨 Accommodation Picks (3 options at different price points)
-  * 📅 Day-by-Day Itinerary
-  * 🍜 Must-Try Food & Restaurants
-  * 💰 Budget Breakdown
-  * 🌤️ Weather & Packing Tips
-- Be specific with prices, names, and logistics. This is a real plan, not generic advice."""
-
-
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# ── System prompts ──────────────────────────────────────────────────────────
 
-def get_tools():
+FLIGHT_AGENT_PROMPT = """You are FlightAgent, a specialist in air travel research.
+
+Your job: research flight options for the user's trip. Run 2 to 4 targeted web searches (origin to destination, dates/season, airlines, price ranges). Then output ONLY this markdown section:
+
+## Flights
+- 2 to 3 concrete options. For each: airline(s), route, approximate price per person (USD), total duration, and any layovers.
+- One short paragraph after the bullets: best pick and why.
+
+Be specific with airline names and prices. Do not write anything outside the `## Flights` section."""
+
+HOTEL_AGENT_PROMPT = """You are HotelAgent, a specialist in accommodation research.
+
+Your job: research lodging within the user's stated budget. Run 2 to 4 targeted web searches (city neighborhoods, hotel/Airbnb prices, traveler reviews). Then output ONLY this markdown section:
+
+## Accommodation
+- 3 specific picks at different price tiers (budget / comfort / luxury). For each: name, neighborhood, approximate nightly rate (USD), and a one-line reason it fits.
+- One short paragraph after the bullets: which to default to and why.
+
+Use real hotel/Airbnb names where possible. Do not write anything outside the `## Accommodation` section."""
+
+ITINERARY_AGENT_PROMPT = """You are ItineraryAgent, a specialist in destination experiences.
+
+Your job: research attractions, food, weather, and local logistics. Run 3 to 5 targeted web searches (top sights, neighborhoods, restaurants, weather for the trip month, transit). Then output ONLY this markdown section:
+
+## Itinerary
+A day-by-day plan covering the full trip duration. For each day:
+- 2 to 4 named activities or neighborhoods
+- 1 specific restaurant or food recommendation
+
+After the days, add a short paragraph titled **Weather and packing** with the seasonal forecast and what to bring.
+
+Be concrete: real place names, real restaurants. Do not write anything outside the `## Itinerary` section."""
+
+PLANNER_SYNTHESIS_PROMPT = """You are PlannerAgent, the orchestrator. Three specialist agents have already produced research sections. Your job is to compose the final travel plan.
+
+Inputs you will receive:
+- The original user request
+- A `## Flights` section from FlightAgent
+- An `## Accommodation` section from HotelAgent
+- An `## Itinerary` section from ItineraryAgent
+
+Output a single markdown document in this exact order:
+1. A one-paragraph **Trip Summary** (destination, dates/duration, traveler count, headline budget).
+2. The `## Flights` section verbatim.
+3. The `## Accommodation` section verbatim.
+4. The `## Itinerary` section verbatim.
+5. A new `## Budget Breakdown` section with a markdown table: Category | Estimated Cost | Notes. Cover flights, lodging, food, activities, transit, buffer. Sum to the user's stated total budget; flag if the realistic estimate exceeds it.
+
+Do not invent new flights, hotels, or itinerary entries. Only restructure and add the summary plus budget breakdown."""
+
+
+# ── Tool definition ─────────────────────────────────────────────────────────
+
+def _web_search_tool() -> list[types.Tool]:
     return [
         types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
                     name="web_search",
-                    description="Search the web for real-time travel information: flights, hotels, attractions, weather, travel tips, visa requirements, and more.",
+                    description="Search the web for real-time travel information.",
                     parameters=types.Schema(
                         type=types.Type.OBJECT,
                         properties={
                             "query": types.Schema(
                                 type=types.Type.STRING,
-                                description="Specific search query for travel information",
+                                description="Specific search query.",
                             )
                         },
                         required=["query"],
@@ -49,111 +96,209 @@ def get_tools():
     ]
 
 
-def run_agent(user_query: str, gemini_key: str, tavily_key: str, on_tool_call=None, on_tool_result=None):
-    """
-    Run the travel planning agent.
-    
-    on_tool_call(query: str) -> called when agent fires a search
-    on_tool_result(query: str, summary: str) -> called when search result is received
-    
-    Returns: (final_plan: str, tool_calls: list)
+# ── Event protocol ──────────────────────────────────────────────────────────
+
+EventCallback = Callable[[str, dict], None]
+"""Signature: on_event(event_type, payload).
+
+Event types:
+  agent_status: {agent, status}              status in {running, done, error}
+  tool_call:    {agent, query}
+  tool_result:  {agent, query, summary, sources_count}
+  section_done: {agent, section}
+  final_plan:   {plan}
+"""
+
+
+@dataclass
+class SubAgentResult:
+    name: str
+    section: str
+    tool_calls: list[dict] = field(default_factory=list)
+
+
+# ── Sub-agent runner ────────────────────────────────────────────────────────
+
+def _run_sub_agent(
+    *,
+    name: str,
+    system_prompt: str,
+    user_query: str,
+    gemini_client,
+    tavily_client,
+    on_event: EventCallback,
+    max_iterations: int = 6,
+) -> SubAgentResult:
+    contents = [
+        types.Content(role="user", parts=[types.Part.from_text(text=user_query)]),
+    ]
+    tool_calls: list[dict] = []
+
+    on_event("agent_status", {"agent": name, "status": "running"})
+
+    try:
+        for iteration in range(1, max_iterations + 1):
+            sys_msg = system_prompt
+            if iteration == max_iterations:
+                sys_msg += "\n\nIMPORTANT: Search budget exhausted. Output the final markdown section now using what you have. Do NOT call web_search again."
+
+            response = gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=sys_msg,
+                    max_output_tokens=4096,
+                    tools=_web_search_tool() if iteration < max_iterations else None,
+                ),
+            )
+
+            function_calls = response.function_calls or []
+
+            if not function_calls:
+                section = response.text or ""
+                on_event("section_done", {"agent": name, "section": section})
+                on_event("agent_status", {"agent": name, "status": "done"})
+                return SubAgentResult(name=name, section=section, tool_calls=tool_calls)
+
+            model_content = response.candidates[0].content if response.candidates else None
+            if model_content is None:
+                break
+            contents.append(model_content)
+
+            response_parts = []
+            for call in function_calls:
+                if call.name != "web_search":
+                    continue
+                query = (call.args or {}).get("query", "")
+
+                on_event("tool_call", {"agent": name, "query": query})
+
+                try:
+                    result = tavily_client.search(query, max_results=5, search_depth="advanced")
+                    results_list = result.get("results", [])
+                    formatted = []
+                    for r in results_list:
+                        title = r.get("title", "")
+                        content = r.get("content", "")[:300]
+                        url = r.get("url", "")
+                        formatted.append(f"**{title}**\n{content}\nSource: {url}")
+                    search_content = "\n\n".join(formatted) if formatted else "No results found."
+                    summary = results_list[0].get("content", "")[:150] if results_list else "No data"
+                    sources_count = len(results_list)
+                except Exception as e:
+                    search_content = f"Search failed: {e}"
+                    summary = "Search failed"
+                    sources_count = 0
+
+                on_event("tool_result", {
+                    "agent": name, "query": query,
+                    "summary": summary, "sources_count": sources_count,
+                })
+
+                tool_calls.append({"query": query, "summary": summary, "sources_count": sources_count})
+
+                response_parts.append(
+                    types.Part.from_function_response(
+                        name="web_search",
+                        response={"result": search_content},
+                    )
+                )
+
+            if response_parts:
+                contents.append(types.Content(role="user", parts=response_parts))
+
+    except Exception as e:
+        on_event("agent_status", {"agent": name, "status": "error", "message": str(e)})
+        return SubAgentResult(name=name, section=f"_{name} failed: {e}_", tool_calls=tool_calls)
+
+    on_event("agent_status", {"agent": name, "status": "done"})
+    return SubAgentResult(name=name, section="_(no output)_", tool_calls=tool_calls)
+
+
+# ── Planner orchestrator ────────────────────────────────────────────────────
+
+SUB_AGENTS = [
+    ("flight", FLIGHT_AGENT_PROMPT),
+    ("hotel", HOTEL_AGENT_PROMPT),
+    ("itinerary", ITINERARY_AGENT_PROMPT),
+]
+
+
+def run_planner(
+    *,
+    user_query: str,
+    gemini_key: str,
+    tavily_key: str,
+    on_event: EventCallback,
+) -> dict:
+    """Run the full multi-agent planning pipeline.
+
+    Returns: {plan, total_searches, total_sources}
     """
     try:
         from tavily import TavilyClient
-    except ImportError:
-        raise ImportError("Run: pip install tavily-python")
+    except ImportError as e:
+        raise ImportError("Run: pip install tavily-python") from e
 
-    client = genai.Client(api_key=gemini_key)
-    tavily = TavilyClient(api_key=tavily_key)
+    gemini_client = genai.Client(api_key=gemini_key)
+    tavily_client = TavilyClient(api_key=tavily_key)
 
-    contents = [
-        types.Content(
-            role="user",
-            parts=[types.Part.from_text(text=user_query)],
-        )
-    ]
-    tool_calls_log = []
-    iteration = 0
-    max_iterations = 10
+    on_event("agent_status", {"agent": "planner", "status": "running"})
 
-    while iteration < max_iterations:
-        iteration += 1
+    results: dict[str, SubAgentResult] = {}
+    lock = threading.Lock()
 
-        # Final iteration — force agent to wrap up
-        system_msg = SYSTEM_PROMPT
-        if iteration == max_iterations:
-            system_msg += "\n\nIMPORTANT: You have reached the search budget. Produce the final travel plan now using the information already gathered. Do NOT call web_search again."
+    def safe_emit(event_type: str, payload: dict):
+        with lock:
+            on_event(event_type, payload)
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system_msg,
-                max_output_tokens=8192,
-                tools=get_tools() if iteration < max_iterations else None,
-            ),
-        )
+    with ThreadPoolExecutor(max_workers=len(SUB_AGENTS)) as pool:
+        futures = {
+            pool.submit(
+                _run_sub_agent,
+                name=name,
+                system_prompt=prompt,
+                user_query=user_query,
+                gemini_client=gemini_client,
+                tavily_client=tavily_client,
+                on_event=safe_emit,
+            ): name
+            for name, prompt in SUB_AGENTS
+        }
+        for fut in as_completed(futures):
+            name = futures[fut]
+            results[name] = fut.result()
 
-        function_calls = response.function_calls or []
+    # Synthesize
+    flight_sec = results.get("flight", SubAgentResult("flight", "")).section
+    hotel_sec = results.get("hotel", SubAgentResult("hotel", "")).section
+    itin_sec = results.get("itinerary", SubAgentResult("itinerary", "")).section
 
-        if not function_calls:
-            return response.text or "Agent did not produce a final plan.", tool_calls_log
+    synthesis_input = (
+        f"Original request: {user_query}\n\n"
+        f"=== FlightAgent output ===\n{flight_sec}\n\n"
+        f"=== HotelAgent output ===\n{hotel_sec}\n\n"
+        f"=== ItineraryAgent output ===\n{itin_sec}\n"
+    )
 
-        model_content = response.candidates[0].content if response.candidates else None
-        if model_content:
-            contents.append(model_content)
-        else:
-            # No candidate content but tool calls present — abort safely
-            return response.text or "Agent did not produce a final plan.", tool_calls_log
+    final_response = gemini_client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=[types.Content(role="user", parts=[types.Part.from_text(text=synthesis_input)])],
+        config=types.GenerateContentConfig(
+            system_instruction=PLANNER_SYNTHESIS_PROMPT,
+            max_output_tokens=8192,
+        ),
+    )
 
-        function_response_parts = []
+    final_plan = final_response.text or "Final synthesis returned empty."
+    on_event("final_plan", {"plan": final_plan})
+    on_event("agent_status", {"agent": "planner", "status": "done"})
 
-        for call in function_calls:
-            if call.name != "web_search":
-                continue
+    total_searches = sum(len(r.tool_calls) for r in results.values())
+    total_sources = sum(c.get("sources_count", 0) for r in results.values() for c in r.tool_calls)
 
-            query = (call.args or {}).get("query", "")
-
-            if on_tool_call:
-                on_tool_call(query)
-
-            try:
-                result = tavily.search(query, max_results=5, search_depth="advanced")
-                results_list = result.get("results", [])
-
-                formatted = []
-                for r in results_list:
-                    title = r.get("title", "")
-                    content = r.get("content", "")[:300]
-                    url = r.get("url", "")
-                    formatted.append(f"**{title}**\n{content}\nSource: {url}")
-
-                search_content = "\n\n".join(formatted) if formatted else "No results found."
-                summary = results_list[0].get("content", "")[:150] if results_list else "No data"
-                sources_count = len(results_list)
-
-            except Exception as e:
-                search_content = f"Search failed: {str(e)}"
-                summary = "Search failed"
-                sources_count = 0
-
-            if on_tool_result:
-                on_tool_result(query, summary)
-
-            tool_calls_log.append({
-                "query": query,
-                "result_preview": summary,
-                "sources_count": sources_count,
-            })
-
-            function_response_parts.append(
-                types.Part.from_function_response(
-                    name="web_search",
-                    response={"result": search_content},
-                )
-            )
-
-        if function_response_parts:
-            contents.append(types.Content(role="user", parts=function_response_parts))
-
-    return "Agent did not produce a final plan.", tool_calls_log
+    return {
+        "plan": final_plan,
+        "total_searches": total_searches,
+        "total_sources": total_sources,
+    }

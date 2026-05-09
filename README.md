@@ -1,4 +1,4 @@
-# ✈️ TravelMind AI Agent
+# TravelMind AI Agent
 
 An agentic AI travel planner. Give it a natural-language trip request and it autonomously searches the web, then synthesizes a complete itinerary — streamed live to a polished web UI.
 
@@ -7,9 +7,9 @@ An agentic AI travel planner. Give it a natural-language trip request and it aut
 > "Plan a 5-day trip to Tokyo for 2 people, $3000 total budget, flying from Boston in July"
 
 The agent:
-1. 🔍 Searches flights, hotels, attractions, food, weather (live, via Tavily)
-2. 📋 Synthesizes results into a structured day-by-day plan
-3. ⚡ Streams every tool call to the UI as it happens (Server-Sent Events)
+1. Searches flights, hotels, attractions, food, weather (live, via Tavily)
+2. Synthesizes results into a structured day-by-day plan
+3. Streams every tool call to the UI as it happens (Server-Sent Events)
 
 ## Stack
 
@@ -34,7 +34,7 @@ pip install -r requirements.txt
 uvicorn server:app --reload
 ```
 
-Open http://localhost:8000 — click ⚙ to enter your keys (stored in `localStorage`), describe your trip, hit **Plan my trip**.
+Open http://localhost:8000, click **API Keys** to enter your keys (stored in `localStorage`), describe your trip, hit **Plan my trip**.
 
 ## Architecture
 
