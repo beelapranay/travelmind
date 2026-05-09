@@ -1,81 +1,60 @@
 # ✈️ TravelMind AI Agent
 
-An agentic AI travel planner that autonomously searches the web, makes decisions, and synthesizes a complete trip plan from a single natural language request.
+An agentic AI travel planner. Give it a natural-language trip request and it autonomously searches the web, then synthesizes a complete itinerary — streamed live to a polished web UI.
 
 ## What it does
 
-Give it a trip request like:
 > "Plan a 5-day trip to Tokyo for 2 people, $3000 total budget, flying from Boston in July"
 
-The agent will:
-1. 🔍 Search for real-time flight options and prices
-2. 🔍 Search for hotels within the budget
-3. 🔍 Search for top attractions and activities
-4. 🔍 Search for local food recommendations  
-5. 🔍 Search for weather and travel tips
-6. 📋 Synthesize all results into a structured day-by-day itinerary
+The agent:
+1. 🔍 Searches flights, hotels, attractions, food, weather (live, via Tavily)
+2. 📋 Synthesizes results into a structured day-by-day plan
+3. ⚡ Streams every tool call to the UI as it happens (Server-Sent Events)
 
 ## Stack
 
-- **LLM**: Gemini 2.5 Flash via function calling
-- **Search**: Tavily Search API (real-time web search)
-- **UI**: Streamlit with live agent activity feed
+- **Backend**: FastAPI + SSE streaming
+- **LLM**: Gemini 2.5 Flash (function calling)
+- **Search**: Tavily Search API
+- **Frontend**: Single-page app — Tailwind, glassmorphism, marked.js, no build step
 
 ## Setup
 
-### 1. Get API keys (both free)
-- **Gemini**: https://aistudio.google.com/app/apikey → API Keys
-- **Tavily**: https://tavily.com → Sign up → Dashboard → API Keys
+### 1. API keys (both free)
+- Gemini: https://aistudio.google.com/app/apikey
+- Tavily: https://tavily.com
 
-### 2. Install dependencies
+### 2. Install
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 3. Run
 ```bash
-streamlit run app.py
+uvicorn server:app --reload
 ```
 
-Enter your API keys in the sidebar, type a trip request, and hit "Plan My Trip".
+Open http://localhost:8000 — click ⚙ to enter your keys (stored in `localStorage`), describe your trip, hit **Plan my trip**.
 
 ## Architecture
 
 ```
-User Input
-    │
-    ▼
-Gemini 2.5 Flash (orchestrator)
-    │
-    ├── Tool Call: web_search("Boston to Tokyo flights July 2025")
-    │       └── Tavily API → Real web results → Back to Gemini
-    │
-    ├── Tool Call: web_search("Best hotels Tokyo Shinjuku under $150/night")
-    │       └── Tavily API → Real web results → Back to Gemini
-    │
-    ├── Tool Call: web_search("Top things to do Tokyo 5 days itinerary")
-    │       └── Tavily API → Real web results → Back to Gemini
-    │
-    ├── Tool Call: web_search("Tokyo local food must try restaurants")
-    │       └── Tavily API → Real web results → Back to Gemini
-    │
-    └── Tool Call: web_search("Tokyo weather July packing tips")
-            └── Tavily API → Real web results → Back to Gemini
-                │
-                ▼
-        Final Synthesis → Structured Travel Plan
+Browser ──POST /api/plan──▶ FastAPI
+                              │
+                              ▼
+                    Gemini 2.5 Flash (orchestrator)
+                              │
+                              ├─ tool: web_search ──▶ Tavily ──▶ results
+                              ├─ tool: web_search ──▶ Tavily ──▶ results
+                              └─ ... (up to 10 iters)
+                              │
+        SSE stream ◀──────────┘  (tool_call, tool_result, done events)
 ```
 
-The agent autonomously decides:
-- How many searches to run
-- What to search for based on prior results
-- When it has enough information to produce the final plan
+The agent autonomously decides how many searches to run, what to search for next based on prior results, and when it has enough to write the final plan.
 
-## Demo script (for recording)
+## Files
 
-1. Open the app at localhost:8501
-2. Enter your keys in the sidebar
-3. Type: "Plan a 5-day trip to Tokyo for 2 people, $3000 budget, from Boston in July"
-4. Hit "Plan My Trip"
-5. Show the agent activity panel as tool calls fire in real time
-6. Show the final structured itinerary when complete
+- `server.py` — FastAPI app, SSE endpoint
+- `agent.py` — Gemini agent loop, Tavily tool
+- `static/index.html` + `app.js` + `styles.css` — frontend

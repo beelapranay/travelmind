@@ -74,31 +74,37 @@ def run_agent(user_query: str, gemini_key: str, tavily_key: str, on_tool_call=No
     ]
     tool_calls_log = []
     iteration = 0
-    max_iterations = 10  # Safety cap
+    max_iterations = 10
 
     while iteration < max_iterations:
         iteration += 1
+
+        # Final iteration — force agent to wrap up
+        system_msg = SYSTEM_PROMPT
+        if iteration == max_iterations:
+            system_msg += "\n\nIMPORTANT: You have reached the search budget. Produce the final travel plan now using the information already gathered. Do NOT call web_search again."
 
         response = client.models.generate_content(
             model=GEMINI_MODEL,
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                max_output_tokens=4096,
-                tools=get_tools(),
+                system_instruction=system_msg,
+                max_output_tokens=8192,
+                tools=get_tools() if iteration < max_iterations else None,
             ),
         )
 
         function_calls = response.function_calls or []
 
-        # Agent is done - extract final text
         if not function_calls:
             return response.text or "Agent did not produce a final plan.", tool_calls_log
 
-        # Agent wants to use tools
         model_content = response.candidates[0].content if response.candidates else None
         if model_content:
             contents.append(model_content)
+        else:
+            # No candidate content but tool calls present — abort safely
+            return response.text or "Agent did not produce a final plan.", tool_calls_log
 
         function_response_parts = []
 
@@ -108,16 +114,13 @@ def run_agent(user_query: str, gemini_key: str, tavily_key: str, on_tool_call=No
 
             query = (call.args or {}).get("query", "")
 
-            # Notify UI: tool call fired
             if on_tool_call:
                 on_tool_call(query)
 
-            # Execute the search
             try:
-                result = tavily.search(query, max_results=5, search_depth="basic")
+                result = tavily.search(query, max_results=5, search_depth="advanced")
                 results_list = result.get("results", [])
 
-                # Format results for the agent
                 formatted = []
                 for r in results_list:
                     title = r.get("title", "")
@@ -127,18 +130,20 @@ def run_agent(user_query: str, gemini_key: str, tavily_key: str, on_tool_call=No
 
                 search_content = "\n\n".join(formatted) if formatted else "No results found."
                 summary = results_list[0].get("content", "")[:150] if results_list else "No data"
+                sources_count = len(results_list)
 
             except Exception as e:
                 search_content = f"Search failed: {str(e)}"
                 summary = "Search failed"
+                sources_count = 0
 
-            # Notify UI: result received
             if on_tool_result:
                 on_tool_result(query, summary)
 
             tool_calls_log.append({
                 "query": query,
-                "result_preview": summary
+                "result_preview": summary,
+                "sources_count": sources_count,
             })
 
             function_response_parts.append(
@@ -149,6 +154,6 @@ def run_agent(user_query: str, gemini_key: str, tavily_key: str, on_tool_call=No
             )
 
         if function_response_parts:
-            contents.append(types.UserContent(parts=function_response_parts))
+            contents.append(types.Content(role="user", parts=function_response_parts))
 
     return "Agent did not produce a final plan.", tool_calls_log

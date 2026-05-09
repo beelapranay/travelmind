@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TravelMind — AI Travel Planner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="/static/styles.css" />
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        display: ['Space Grotesk', 'Inter', 'sans-serif'],
+      },
+      colors: {
+        ink: { 900: '#07080d', 800: '#0c0e16', 700: '#11141f', 600: '#181c2a' },
+        accent: { 500: '#7c5cff', 600: '#5b3df0' },
+        cyan: { 400: '#22d3ee' },
+      },
+    },
+  },
+};
+</script>
+</head>
+<body class="bg-ink-900 text-slate-200 font-sans min-h-screen antialiased">
+
+<div class="bg-blob blob-1"></div>
+<div class="bg-blob blob-2"></div>
+<div class="bg-blob blob-3"></div>
+
+<div class="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
+
+  <!-- Header -->
+  <header class="flex items-center justify-between gap-3 mb-10 sm:mb-12">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="shrink-0 w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-gradient-to-br from-accent-500 to-cyan-400 flex items-center justify-center text-xl shadow-glow">
+        ✈
+      </div>
+      <div class="min-w-0">
+        <h1 class="font-display text-xl sm:text-2xl font-bold tracking-tight truncate">TravelMind</h1>
+        <p class="text-xs text-slate-400 -mt-0.5 truncate hidden sm:block">Autonomous AI travel planner</p>
+      </div>
+    </div>
+    <button id="settingsBtn" class="shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm transition inline-flex items-center gap-2">
+      <span>⚙</span> <span class="hidden sm:inline">API Keys</span><span class="sm:hidden">Keys</span>
+    </button>
+  </header>
+
+  <!-- Hero -->
+  <section class="text-center mb-10 sm:mb-12 max-w-3xl mx-auto">
+    <h2 class="font-display text-3xl sm:text-5xl md:text-6xl font-bold leading-tight mb-4">
+      Describe your trip.<br />
+      <span class="bg-gradient-to-r from-accent-500 via-cyan-400 to-pink-400 bg-clip-text text-transparent whitespace-nowrap">We plan it live.</span>
+    </h2>
+    <p class="text-slate-400 text-base sm:text-lg">
+      Watch an AI agent search the web in real time and compose your itinerary.
+    </p>
+  </section>
+
+  <!-- Input -->
+  <section class="glass rounded-2xl p-5 sm:p-6 md:p-8 mb-6 max-w-4xl mx-auto">
+    <textarea
+      id="queryInput"
+      rows="3"
+      class="w-full bg-transparent text-base sm:text-lg placeholder-slate-500 outline-none resize-none"
+      placeholder="e.g. 5 days in Tokyo for 2 people, $3000 budget, from Boston in July"
+    ></textarea>
+    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mt-4 pt-4 border-t border-white/5">
+      <div id="examples" class="flex gap-2 flex-wrap text-xs flex-1 min-w-0"></div>
+      <button
+        id="planBtn"
+        class="shrink-0 whitespace-nowrap w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-accent-500 to-cyan-400 text-white font-semibold shadow-glow hover:shadow-glow-lg transition disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
+      >
+        <span>Plan my trip</span>
+        <span class="text-lg leading-none">→</span>
+      </button>
+    </div>
+  </section>
+
+  <!-- Status banner -->
+  <div id="statusBanner" class="hidden text-center text-sm text-slate-400 mb-6"></div>
+
+  <!-- Results -->
+  <section id="results" class="hidden grid md:grid-cols-5 gap-6 mb-12">
+    <!-- Agent activity -->
+    <div class="md:col-span-2 glass rounded-2xl p-5 sm:p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-display font-semibold text-lg flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" id="liveDot"></span>
+          Agent Activity
+        </h3>
+        <span id="callCount" class="text-xs text-slate-400">0 searches</span>
+      </div>
+      <div id="activity" class="space-y-3 max-h-[600px] overflow-y-auto pr-2"></div>
+    </div>
+
+    <!-- Plan -->
+    <div class="md:col-span-3 glass rounded-2xl p-5 sm:p-6 md:p-8">
+      <h3 class="font-display font-semibold text-lg mb-4 flex items-center gap-2">
+        <span>📋</span> Your Travel Plan
+      </h3>
+      <div id="planLoader" class="space-y-3">
+        <div class="shimmer h-4 rounded w-3/4"></div>
+        <div class="shimmer h-4 rounded w-full"></div>
+        <div class="shimmer h-4 rounded w-5/6"></div>
+        <div class="shimmer h-4 rounded w-2/3"></div>
+        <div class="shimmer h-4 rounded w-full mt-6"></div>
+        <div class="shimmer h-4 rounded w-4/6"></div>
+      </div>
+      <article id="plan" class="prose-plan hidden"></article>
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <section id="stats" class="hidden grid grid-cols-3 gap-4 max-w-3xl mx-auto mb-12">
+    <div class="glass rounded-xl p-4 text-center">
+      <div class="text-2xl font-bold text-accent-500" id="statSearches">0</div>
+      <div class="text-xs text-slate-400 uppercase tracking-wider mt-1">Searches</div>
+    </div>
+    <div class="glass rounded-xl p-4 text-center">
+      <div class="text-2xl font-bold text-cyan-400" id="statSources">0</div>
+      <div class="text-xs text-slate-400 uppercase tracking-wider mt-1">Sources</div>
+    </div>
+    <div class="glass rounded-xl p-4 text-center">
+      <div class="text-2xl font-bold text-pink-400" id="statTime">—</div>
+      <div class="text-xs text-slate-400 uppercase tracking-wider mt-1">Seconds</div>
+    </div>
+  </section>
+
+  <footer class="text-center text-xs text-slate-500 py-6">
+    Powered by Gemini 2.5 Flash · Tavily Search
+  </footer>
+</div>
+
+<!-- Settings modal -->
+<div id="settingsModal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+  <div class="glass rounded-2xl p-8 max-w-md w-full">
+    <div class="flex items-center justify-between mb-6">
+      <h3 class="font-display text-xl font-semibold">API Keys</h3>
+      <button id="closeSettings" class="text-slate-400 hover:text-white text-xl">×</button>
+    </div>
+    <p class="text-sm text-slate-400 mb-6">
+      Stored locally in your browser. Never sent anywhere except the providers.
+    </p>
+    <div class="flex items-center justify-between mb-2">
+      <label class="block text-sm font-medium">Gemini API Key</label>
+      <span id="geminiSaved" class="text-xs text-emerald-400 opacity-0 transition-opacity">✓ Saved</span>
+    </div>
+    <input id="geminiKey" type="password" placeholder="AIza..." class="w-full bg-ink-700 border border-white/10 rounded-lg px-4 py-2.5 mb-2 outline-none focus:border-accent-500" />
+    <a href="https://aistudio.google.com/app/apikey" target="_blank" class="text-xs text-accent-500 hover:underline mb-5 block">Get a Gemini key →</a>
+
+    <div class="flex items-center justify-between mb-2">
+      <label class="block text-sm font-medium">Tavily API Key</label>
+      <span id="tavilySaved" class="text-xs text-emerald-400 opacity-0 transition-opacity">✓ Saved</span>
+    </div>
+    <input id="tavilyKey" type="password" placeholder="tvly-..." class="w-full bg-ink-700 border border-white/10 rounded-lg px-4 py-2.5 mb-2 outline-none focus:border-accent-500" />
+    <a href="https://tavily.com" target="_blank" class="text-xs text-accent-500 hover:underline mb-6 block">Get a Tavily key →</a>
+
+    <button id="closeSettingsBtn" class="w-full py-3 rounded-xl bg-gradient-to-r from-accent-500 to-cyan-400 text-white font-semibold">
+      Done
+    </button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
