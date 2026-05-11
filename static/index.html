@@ -162,6 +162,13 @@ tailwind.config = {
     <input id="tavilyKey" type="password" placeholder="tvly-..." class="w-full bg-ink-700 border border-white/10 rounded-lg px-4 py-2.5 mb-2 outline-none focus:border-accent-500" />
     <a href="https://tavily.com" target="_blank" class="text-xs text-accent-500 hover:underline mb-6 block">Get a Tavily key</a>
 
+    <div class="flex items-center justify-between mb-2">
+      <label class="block text-sm font-medium">Google Maps API Key <span class="text-slate-500 text-xs font-normal">(optional)</span></label>
+      <span id="gmapsSaved" class="text-xs text-emerald-400 opacity-0 transition-opacity">Saved</span>
+    </div>
+    <input id="gmapsKey" type="password" placeholder="AIza... (skip if you don't have one)" class="w-full bg-ink-700 border border-white/10 rounded-lg px-4 py-2.5 mb-2 outline-none focus:border-accent-500" />
+    <a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" class="text-xs text-accent-500 hover:underline mb-6 block">Get a Google Maps key</a>
+
     <button id="closeSettingsBtn" class="w-full py-3 rounded-xl bg-gradient-to-r from-accent-500 to-cyan-400 text-white font-semibold">
       Done
     </button>

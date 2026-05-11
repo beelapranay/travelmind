@@ -31,6 +31,7 @@ class PlanRequest(BaseModel):
     query: str
     gemini_key: str
     tavily_key: str
+    gmaps_key: str | None = None
 
 
 class PrefsBody(BaseModel):
@@ -81,6 +82,7 @@ async def plan(req: PlanRequest):
                 user_query=req.query,
                 gemini_key=req.gemini_key,
                 tavily_key=req.tavily_key,
+                gmaps_key=(req.gmaps_key or None),
                 on_event=on_event,
                 request_prefs=request_prefs,
             )

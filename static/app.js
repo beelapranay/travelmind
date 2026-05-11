@@ -52,6 +52,7 @@ function bindAutoSave(inputId, storageKey, badgeId) {
 $("settingsBtn").onclick = () => {
   $("geminiKey").value = localStorage.getItem("gemini_key") || "";
   $("tavilyKey").value = localStorage.getItem("tavily_key") || "";
+  $("gmapsKey").value = localStorage.getItem("gmaps_key") || "";
   settingsModal.classList.remove("hidden");
 };
 $("closeSettings").onclick = () => settingsModal.classList.add("hidden");
@@ -60,6 +61,7 @@ settingsModal.onclick = (e) => { if (e.target === settingsModal) settingsModal.c
 
 bindAutoSave("geminiKey", "gemini_key", "geminiSaved");
 bindAutoSave("tavilyKey", "tavily_key", "tavilySaved");
+bindAutoSave("gmapsKey", "gmaps_key", "gmapsSaved");
 
 window.addEventListener("DOMContentLoaded", () => {
   if (!localStorage.getItem("gemini_key") || !localStorage.getItem("tavily_key")) {
@@ -71,7 +73,7 @@ window.addEventListener("DOMContentLoaded", () => {
 const mcpBar = $("mcpBar");
 const savedNote = $("savedNote");
 
-const MCP_LABELS = { tavily: "Tavily MCP", fs: "Filesystem MCP" };
+const MCP_LABELS = { tavily: "Tavily MCP", fs: "Filesystem MCP", gmaps: "Google Maps MCP" };
 
 function setMcpStatus(server, status, message) {
   let chip = mcpBar.querySelector(`[data-mcp="${server}"]`);
@@ -400,6 +402,7 @@ async function runPlan() {
   const query = $("queryInput").value.trim();
   const geminiKey = localStorage.getItem("gemini_key") || "";
   const tavilyKey = localStorage.getItem("tavily_key") || "";
+  const gmapsKey = localStorage.getItem("gmaps_key") || "";
 
   if (!query) return showBanner("Enter a trip description first.");
   if (!geminiKey || !tavilyKey) {
@@ -435,7 +438,12 @@ async function runPlan() {
     const res = await fetch("/api/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, gemini_key: geminiKey, tavily_key: tavilyKey }),
+      body: JSON.stringify({
+        query,
+        gemini_key: geminiKey,
+        tavily_key: tavilyKey,
+        gmaps_key: gmapsKey || null,
+      }),
     });
 
     if (!res.ok || !res.body) throw new Error("Server error: " + res.status);

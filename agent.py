@@ -68,7 +68,12 @@ Rules: real property names. Prices in USD per night. No prose paragraphs. No tex
 
 ITINERARY_AGENT_PROMPT = """You are ItineraryAgent, a specialist in destination experiences.
 
-Your job: research attractions, food, weather, transit. Run 3 to 5 targeted web searches. Then output ONLY this markdown section:
+Your job: research attractions, food, weather, transit. Use the tools available to you:
+- `web_search` for blogs, reviews, weather, opening hours.
+- `maps_search_places` (if available) to find real named attractions/restaurants — prefer this over web_search when you need a list of places near a location.
+- `maps_distance_matrix` (if available) to verify that a day's stops are geographically clustered. If two stops are >30 min apart you probably shouldn't pair them.
+
+Run 3 to 6 tool calls total. Then output ONLY this markdown section:
 
 ## Itinerary
 
@@ -175,29 +180,73 @@ Rules:
 - Do not invent new flights, hotels, or attractions unless an issue specifically requires it."""
 
 
-# ── Tool definition ─────────────────────────────────────────────────────────
+# ── Tool abstraction ────────────────────────────────────────────────────────
 
-def _web_search_tool() -> list[types.Tool]:
+@dataclass
+class AgentTool:
+    """A tool a sub-agent can call. Decouples Gemini declarations from execution."""
+    name: str
+    declaration: types.FunctionDeclaration
+    backend: Callable[[dict], str]  # args -> text result
+
+
+_JSON_TO_GEMINI_TYPE = {
+    "string": types.Type.STRING,
+    "number": types.Type.NUMBER,
+    "integer": types.Type.INTEGER,
+    "boolean": types.Type.BOOLEAN,
+    "array": types.Type.ARRAY,
+    "object": types.Type.OBJECT,
+}
+
+
+def _jsonschema_to_gemini(schema: Optional[dict]) -> Optional[types.Schema]:
+    """Translate JSON Schema (as exposed by MCP) into a Gemini Schema.
+
+    Handles object/array/primitive types, properties, required, enum, items.
+    Unknown / missing types default to STRING.
+    """
+    if not isinstance(schema, dict):
+        return None
+
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list):
+        raw_type = next((t for t in raw_type if t != "null"), raw_type[0] if raw_type else "string")
+
+    gemini_type = _JSON_TO_GEMINI_TYPE.get(raw_type or "string", types.Type.STRING)
+
+    kwargs: dict = {"type": gemini_type}
+    desc = schema.get("description")
+    if desc:
+        kwargs["description"] = str(desc)[:1024]
+    enum = schema.get("enum")
+    if isinstance(enum, list):
+        kwargs["enum"] = [str(e) for e in enum]
+
+    if gemini_type == types.Type.OBJECT:
+        props = schema.get("properties") or {}
+        translated_props = {}
+        for k, v in props.items():
+            sub = _jsonschema_to_gemini(v)
+            if sub is not None:
+                translated_props[k] = sub
+        if translated_props:
+            kwargs["properties"] = translated_props
+        req = schema.get("required")
+        if isinstance(req, list):
+            kwargs["required"] = [str(r) for r in req if r in translated_props]
+    elif gemini_type == types.Type.ARRAY:
+        items = _jsonschema_to_gemini(schema.get("items"))
+        if items is not None:
+            kwargs["items"] = items
+
+    return types.Schema(**kwargs)
+
+
+def _gemini_tools_from(agent_tools: list[AgentTool]) -> list[types.Tool]:
     return [
-        types.Tool(
-            function_declarations=[
-                types.FunctionDeclaration(
-                    name="web_search",
-                    description="Search the web for real-time travel information.",
-                    parameters=types.Schema(
-                        type=types.Type.OBJECT,
-                        properties={
-                            "query": types.Schema(
-                                type=types.Type.STRING,
-                                description="Specific search query.",
-                            )
-                        },
-                        required=["query"],
-                    ),
-                )
-            ]
-        )
-    ]
+        types.Tool(function_declarations=[t.declaration for t in agent_tools])
+    ] if agent_tools else []
 
 
 # ── Event protocol ──────────────────────────────────────────────────────────
@@ -334,6 +383,112 @@ def _parse_tavily_mcp_result(raw: str) -> list[dict]:
     return []
 
 
+def _build_agent_tools(
+    *,
+    agent_name: str,
+    mcp: Optional[MCPManager],
+    tavily_client,
+    on_event_emit: Callable[[str, dict], None],
+) -> list[AgentTool]:
+    """Pick the right tools per agent. Web search for everyone; Maps for itinerary."""
+    tools: list[AgentTool] = []
+
+    def web_search_backend(args: dict) -> str:
+        query = args.get("query", "")
+        on_event_emit("tool_call", {"agent": agent_name, "query": query, "tool": "web_search"})
+        content, summary, sources, source = _perform_web_search(
+            query=query, mcp=mcp, tavily_client=tavily_client,
+        )
+        on_event_emit("tool_result", {
+            "agent": agent_name, "query": query, "tool": "web_search",
+            "summary": summary, "sources_count": sources, "source": source,
+        })
+        return content
+
+    tools.append(AgentTool(
+        name="web_search",
+        declaration=types.FunctionDeclaration(
+            name="web_search",
+            description="Search the web for real-time travel information.",
+            parameters=types.Schema(
+                type=types.Type.OBJECT,
+                properties={"query": types.Schema(type=types.Type.STRING, description="Specific search query.")},
+                required=["query"],
+            ),
+        ),
+        backend=web_search_backend,
+    ))
+
+    # Google Maps tools — only for itinerary, only when MCP server is up.
+    if agent_name == "itinerary" and mcp is not None and mcp.has_server("gmaps"):
+        for mcp_tool in mcp.list_tools("gmaps"):
+            if mcp_tool["name"] not in ("maps_search_places", "maps_distance_matrix"):
+                continue
+            decl = _build_mcp_declaration(mcp_tool)
+            if decl is None:
+                continue
+            tools.append(_wrap_mcp_tool(
+                agent_name=agent_name,
+                server="gmaps",
+                mcp=mcp,
+                declaration=decl,
+                mcp_tool_name=mcp_tool["name"],
+                on_event_emit=on_event_emit,
+            ))
+
+    return tools
+
+
+def _build_mcp_declaration(mcp_tool: dict) -> Optional[types.FunctionDeclaration]:
+    schema = _jsonschema_to_gemini(mcp_tool.get("input_schema"))
+    if schema is None:
+        return None
+    return types.FunctionDeclaration(
+        name=mcp_tool["name"],
+        description=(mcp_tool.get("description") or "")[:1024],
+        parameters=schema,
+    )
+
+
+def _wrap_mcp_tool(
+    *,
+    agent_name: str,
+    server: str,
+    mcp: MCPManager,
+    declaration: types.FunctionDeclaration,
+    mcp_tool_name: str,
+    on_event_emit: Callable[[str, dict], None],
+) -> AgentTool:
+    tool_label = declaration.name
+
+    def backend(args: dict) -> str:
+        # Human-readable summary of the call for the UI lane.
+        summary = ", ".join(f"{k}={_truncate(v)}" for k, v in (args or {}).items())
+        on_event_emit("tool_call", {"agent": agent_name, "query": summary, "tool": tool_label})
+        try:
+            result = mcp.call_tool(server, mcp_tool_name, args or {}, timeout=30)
+        except Exception as e:
+            err = f"{tool_label} failed: {e}"
+            on_event_emit("tool_result", {
+                "agent": agent_name, "query": summary, "tool": tool_label,
+                "summary": "MCP call failed", "sources_count": 0, "source": "mcp_error",
+            })
+            return err
+        preview = (result or "")[:150].replace("\n", " ")
+        on_event_emit("tool_result", {
+            "agent": agent_name, "query": summary, "tool": tool_label,
+            "summary": preview or "(empty result)", "sources_count": 1, "source": "mcp",
+        })
+        return result or "(empty result)"
+
+    return AgentTool(name=tool_label, declaration=declaration, backend=backend)
+
+
+def _truncate(v, n: int = 40) -> str:
+    s = str(v)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
 def _run_sub_agent(
     *,
     name: str,
@@ -352,11 +507,30 @@ def _run_sub_agent(
 
     on_event("agent_status", {"agent": name, "status": "running"})
 
+    def emit_and_record(event_type: str, payload: dict):
+        on_event(event_type, payload)
+        if event_type == "tool_result":
+            tool_calls.append({
+                "query": payload.get("query", ""),
+                "tool": payload.get("tool", ""),
+                "summary": payload.get("summary", ""),
+                "sources_count": payload.get("sources_count", 0),
+                "source": payload.get("source", ""),
+            })
+
+    agent_tools = _build_agent_tools(
+        agent_name=name, mcp=mcp, tavily_client=tavily_client,
+        on_event_emit=emit_and_record,
+    )
+    tools_by_name = {t.name: t for t in agent_tools}
+    gemini_tools = _gemini_tools_from(agent_tools)
+
     try:
         for iteration in range(1, max_iterations + 1):
             sys_msg = system_prompt
-            if iteration == max_iterations:
-                sys_msg += "\n\nIMPORTANT: Search budget exhausted. Output the final markdown section now using what you have. Do NOT call web_search again."
+            last_iteration = iteration == max_iterations
+            if last_iteration:
+                sys_msg += "\n\nIMPORTANT: Tool budget exhausted. Output the final markdown section now using what you have. Do NOT call any tools."
 
             response = gemini_client.models.generate_content(
                 model=GEMINI_MODEL,
@@ -364,7 +538,7 @@ def _run_sub_agent(
                 config=types.GenerateContentConfig(
                     system_instruction=sys_msg,
                     max_output_tokens=4096,
-                    tools=_web_search_tool() if iteration < max_iterations else None,
+                    tools=gemini_tools if not last_iteration else None,
                 ),
             )
 
@@ -383,35 +557,19 @@ def _run_sub_agent(
 
             response_parts = []
             for call in function_calls:
-                if call.name != "web_search":
+                tool = tools_by_name.get(call.name)
+                if tool is None:
+                    response_parts.append(types.Part.from_function_response(
+                        name=call.name, response={"result": f"Unknown tool: {call.name}"},
+                    ))
                     continue
-                query = (call.args or {}).get("query", "")
-
-                on_event("tool_call", {"agent": name, "query": query})
-
                 try:
-                    search_content, summary, sources_count, source = _perform_web_search(
-                        query=query, mcp=mcp, tavily_client=tavily_client,
-                    )
+                    result_text = tool.backend(dict(call.args or {}))
                 except Exception as e:
-                    search_content = f"Search failed: {e}"
-                    summary = "Search failed"
-                    sources_count = 0
-                    source = "error"
-
-                on_event("tool_result", {
-                    "agent": name, "query": query,
-                    "summary": summary, "sources_count": sources_count, "source": source,
-                })
-
-                tool_calls.append({"query": query, "summary": summary, "sources_count": sources_count, "source": source})
-
-                response_parts.append(
-                    types.Part.from_function_response(
-                        name="web_search",
-                        response={"result": search_content},
-                    )
-                )
+                    result_text = f"Tool {call.name} crashed: {e}"
+                response_parts.append(types.Part.from_function_response(
+                    name=call.name, response={"result": result_text},
+                ))
 
             if response_parts:
                 contents.append(types.Content(role="user", parts=response_parts))
@@ -451,6 +609,7 @@ def run_planner(
     tavily_key: str,
     on_event: EventCallback,
     request_prefs: Optional[PrefsRequester] = None,
+    gmaps_key: Optional[str] = None,
 ) -> dict:
     """Run the full multi-agent planning pipeline.
 
@@ -467,7 +626,7 @@ def run_planner(
     # Spin up MCP servers for this job. Failures are non-fatal: sub-agents
     # fall back to the direct Tavily SDK and persistence is skipped.
     os.makedirs(PLANS_DIR, exist_ok=True)
-    mcp = _init_mcp(tavily_key=tavily_key, on_event=on_event)
+    mcp = _init_mcp(tavily_key=tavily_key, gmaps_key=gmaps_key, on_event=on_event)
 
     on_event("agent_status", {"agent": "planner", "status": "running"})
 
@@ -685,8 +844,16 @@ def _critique_and_revise(
 
 # ── MCP bootstrap + persistence ─────────────────────────────────────────────
 
-def _init_mcp(*, tavily_key: str, on_event: EventCallback) -> Optional[MCPManager]:
-    """Boot Tavily MCP + Filesystem MCP. Returns None if neither came up."""
+def _init_mcp(
+    *,
+    tavily_key: str,
+    gmaps_key: Optional[str],
+    on_event: EventCallback,
+) -> Optional[MCPManager]:
+    """Boot Tavily + Filesystem (always) and Google Maps (when key provided).
+
+    Returns None only if no server came up at all.
+    """
     mcp = MCPManager()
     mcp.start()
     any_up = False
@@ -697,7 +864,7 @@ def _init_mcp(*, tavily_key: str, on_event: EventCallback) -> Optional[MCPManage
         tools = mcp.add_server(
             name="tavily",
             command="npx",
-            args=["-y", "tavily-mcp@latest"],
+            args=["-y", "tavily-mcp"],
             env={**base_env, "TAVILY_API_KEY": tavily_key},
             timeout=60.0,
         )
@@ -720,6 +887,21 @@ def _init_mcp(*, tavily_key: str, on_event: EventCallback) -> Optional[MCPManage
     except Exception as e:
         log.warning("Filesystem MCP did not start: %s", e)
         on_event("mcp_status", {"server": "fs", "status": "error", "message": str(e)})
+
+    if gmaps_key:
+        try:
+            tools = mcp.add_server(
+                name="gmaps",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-google-maps"],
+                env={**base_env, "GOOGLE_MAPS_API_KEY": gmaps_key},
+                timeout=60.0,
+            )
+            any_up = True
+            on_event("mcp_status", {"server": "gmaps", "status": "ready", "tools": [t["name"] for t in tools]})
+        except Exception as e:
+            log.warning("Google Maps MCP did not start: %s", e)
+            on_event("mcp_status", {"server": "gmaps", "status": "error", "message": str(e)})
 
     if not any_up:
         mcp.close()

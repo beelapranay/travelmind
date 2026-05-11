@@ -1,0 +1,10 @@
+# Render blueprint. Push to GitHub, then on render.com:
+#   New + → Blueprint → connect this repo → apply.
+services:
+  - type: web
+    name: travelmind
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    autoDeploy: true
