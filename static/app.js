@@ -77,6 +77,8 @@ window.addEventListener("DOMContentLoaded", () => {
   if (savedCurrency && $("currencySelect")) $("currencySelect").value = savedCurrency;
   const savedMonth = localStorage.getItem("trip_month");
   if (savedMonth && $("monthSelect")) $("monthSelect").value = savedMonth;
+  const savedOrigin = localStorage.getItem("trip_origin");
+  if (savedOrigin && $("originInput")) $("originInput").value = savedOrigin;
 });
 
 async function loadSharedPlan(planId) {
@@ -554,8 +556,10 @@ async function runPlan() {
   try {
     const currency = ($("currencySelect")?.value || "USD").trim();
     const travelMonth = ($("monthSelect")?.value || "").trim();
+    const origin = ($("originInput")?.value || "").trim();
     localStorage.setItem("trip_currency", currency);
     if (travelMonth) localStorage.setItem("trip_month", travelMonth);
+    if (origin) localStorage.setItem("trip_origin", origin); else localStorage.removeItem("trip_origin");
 
     const res = await fetch("/api/plan", {
       method: "POST",
@@ -567,6 +571,7 @@ async function runPlan() {
         gmaps_key: gmapsKey || null,
         currency,
         travel_month: travelMonth || null,
+        origin: origin || null,
       }),
     });
 

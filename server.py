@@ -34,6 +34,7 @@ class PlanRequest(BaseModel):
     gmaps_key: str | None = None
     currency: str = "USD"
     travel_month: str | None = None
+    origin: str | None = None
 
 
 class PrefsBody(BaseModel):
@@ -87,6 +88,7 @@ async def plan(req: PlanRequest):
                 gmaps_key=(req.gmaps_key or None),
                 currency=req.currency,
                 travel_month=req.travel_month,
+                origin=(req.origin or None),
                 on_event=on_event,
                 request_prefs=request_prefs,
             )

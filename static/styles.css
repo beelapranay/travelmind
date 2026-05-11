@@ -430,6 +430,17 @@
   background: #0c0e16;
   color: #f1f5f9;
 }
+.trip-option-input { padding-right: 4px; }
+.trip-option-text {
+  background: transparent;
+  color: #f1f5f9;
+  border: none;
+  outline: none;
+  font-size: 0.85rem;
+  padding: 0;
+  min-width: 130px;
+}
+.trip-option-text::placeholder { color: #64748b; }
 
 /* MCP status bar */
 .mcp-bar {

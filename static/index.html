@@ -75,6 +75,11 @@ tailwind.config = {
       placeholder="e.g. 5 days in Tokyo for 2 people, $3000 budget, from Boston in July"
     ></textarea>
     <div class="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t border-white/5">
+      <label class="trip-option trip-option-input">
+        <span class="trip-option-label">From</span>
+        <input id="originInput" type="text" placeholder="leave blank for no flights"
+               class="trip-option-text" autocomplete="off" />
+      </label>
       <label class="trip-option">
         <span class="trip-option-label">Month</span>
         <select id="monthSelect" class="trip-option-select">

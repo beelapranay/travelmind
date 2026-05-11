@@ -33,7 +33,7 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 FLIGHT_AGENT_PROMPT = """You are FlightAgent, a specialist in air travel research.
 
-Your job: research flight options for the user's trip. Run 2 to 4 targeted web searches (origin to destination, dates/season, airlines, price ranges). Then output ONLY this markdown section:
+Your job: research flight options for the user's trip. The user provides both an origin city and a destination — never invent or substitute either one. Run 2 to 4 targeted web searches (origin to destination, dates/season, airlines, price ranges). Then output ONLY this markdown section:
 
 ## Flights
 
@@ -47,7 +47,18 @@ For each of 2-3 options, use this exact format:
 
 **Best pick:** one sentence naming the option number and why.
 
-Rules: real airline names. Prices in USD. No prose paragraphs. No text outside `## Flights`."""
+Rules: real airline names. Prices in the requested currency. No prose paragraphs. No text outside `## Flights`."""
+
+
+FLIGHT_AGENT_NO_ORIGIN_PROMPT = """You are FlightAgent. The user did NOT provide a departure city for this trip — treat it as a ground-only trip.
+
+Do NOT run any web searches. Do NOT invent or assume an origin city. Output ONLY this exact markdown section, nothing else:
+
+## Flights
+
+_No flights planned — departure city was not provided. Add an origin in the "From" field to include flight research, or treat this as a local / ground-only trip._
+
+That's the complete output. Do not call any tools."""
 
 HOTEL_AGENT_PROMPT = """You are HotelAgent, a specialist in accommodation research.
 
@@ -586,15 +597,18 @@ def _run_sub_agent(
 
 # ── Planner orchestrator ────────────────────────────────────────────────────
 
-SUB_AGENTS = [
-    ("flight", FLIGHT_AGENT_PROMPT),
-    ("hotel", HOTEL_AGENT_PROMPT),
-    ("itinerary", ITINERARY_AGENT_PROMPT),
-]
 
-
-def _format_constraints(*, currency: str, travel_month: Optional[str]) -> str:
+def _format_constraints(
+    *,
+    currency: str,
+    travel_month: Optional[str],
+    origin: Optional[str] = None,
+) -> str:
     parts = []
+    if origin:
+        parts.append(f"Departure city: {origin}.")
+    else:
+        parts.append("No departure city provided — do NOT invent flights or assume an origin.")
     if currency and currency != "USD":
         parts.append(f"Quote all prices in {currency}.")
     if travel_month:
@@ -625,6 +639,7 @@ def run_planner(
     gmaps_key: Optional[str] = None,
     currency: str = "USD",
     travel_month: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> dict:
     """Run the full multi-agent planning pipeline.
 
@@ -646,8 +661,18 @@ def run_planner(
     on_event("agent_status", {"agent": "planner", "status": "running"})
 
     # Prepend structured hints to each sub-agent's view of the user query.
-    constraints = _format_constraints(currency=currency, travel_month=travel_month)
+    constraints = _format_constraints(
+        currency=currency, travel_month=travel_month, origin=origin,
+    )
     enriched_query = (constraints + "\n\n" + user_query).strip() if constraints else user_query
+
+    # FlightAgent gets a different system prompt when no origin is provided.
+    flight_prompt = FLIGHT_AGENT_PROMPT if origin else FLIGHT_AGENT_NO_ORIGIN_PROMPT
+    sub_agents = [
+        ("flight", flight_prompt),
+        ("hotel", HOTEL_AGENT_PROMPT),
+        ("itinerary", ITINERARY_AGENT_PROMPT),
+    ]
 
     results: dict[str, SubAgentResult] = {}
     lock = threading.Lock()
@@ -657,7 +682,7 @@ def run_planner(
             on_event(event_type, payload)
 
     try:
-        with ThreadPoolExecutor(max_workers=len(SUB_AGENTS)) as pool:
+        with ThreadPoolExecutor(max_workers=len(sub_agents)) as pool:
             futures = {
                 pool.submit(
                     _run_sub_agent,
@@ -669,7 +694,7 @@ def run_planner(
                     mcp=mcp,
                     on_event=safe_emit,
                 ): name
-                for name, prompt in SUB_AGENTS
+                for name, prompt in sub_agents
             }
             for fut in as_completed(futures):
                 name = futures[fut]
@@ -689,8 +714,13 @@ def run_planner(
     hotel_sec = results.get("hotel", SubAgentResult("hotel", "")).section
     itin_sec = results.get("itinerary", SubAgentResult("itinerary", "")).section
 
+    origin_line = (
+        f"Departure city: {origin}.\n" if origin
+        else "Departure city: NOT PROVIDED — this is a ground-only trip. Do NOT include a flights row in the budget table; the Flights section will say no flights are planned.\n"
+    )
     synthesis_input = (
         f"Original request: {user_query}\n\n"
+        f"{origin_line}"
         f"Currency for the Budget Breakdown table: {currency}.\n"
         + (f"Travel month: {travel_month}.\n\n" if travel_month else "\n")
         + f"User preferences:\n{_format_prefs(prefs)}\n\n"
@@ -716,6 +746,7 @@ def run_planner(
         plan=final_plan,
         gemini_client=gemini_client,
         on_event=on_event,
+        origin=origin,
     )
 
     # Persist via Filesystem MCP if available. Falls back to direct write.
@@ -829,12 +860,19 @@ def _critique_and_revise(
     plan: str,
     gemini_client,
     on_event: EventCallback,
+    origin: Optional[str] = None,
 ) -> str:
     """Run CriticAgent on the plan. Revise once if not approved. Returns final plan."""
     on_event("agent_status", {"agent": "critic", "status": "running"})
 
+    origin_note = (
+        f"Departure city: {origin}.\n"
+        if origin
+        else "Departure city: NOT PROVIDED. The plan correctly omits flights — do NOT flag missing flights as an issue.\n"
+    )
     critic_input = (
         f"Original request: {user_query}\n\n"
+        f"{origin_note}"
         f"User preferences:\n{_format_prefs(prefs)}\n\n"
         f"=== Plan to review ===\n{plan}\n"
     )
