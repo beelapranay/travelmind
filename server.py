@@ -11,11 +11,11 @@ log = logging.getLogger("travelmind")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import run_planner, PLANS_DIR
+from agent import PLANS_DIR, run_planner
 
 app = FastAPI(title="TravelMind")
 

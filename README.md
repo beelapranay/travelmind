@@ -1,5 +1,11 @@
 # TravelMind
 
+[![CI](https://github.com/beelapranay/travelmind/actions/workflows/ci.yml/badge.svg)](https://github.com/beelapranay/travelmind/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com/)
+[![MCP](https://img.shields.io/badge/MCP-Model%20Context%20Protocol-7c5cff.svg)](https://modelcontextprotocol.io/)
+
 An autonomous, multi-agent AI travel planner. Describe a trip in plain English — TravelMind dispatches specialized agents in parallel, researches flights, lodging, and day-by-day activities from live web sources and Google Maps, pauses to confirm your preferences, self-critiques its own plan, then streams the final itinerary live into your browser.
 
 ```

@@ -1,0 +1,25 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Sensible defaults: pyflakes + a subset of pycodestyle errors.
+# Skip the noisy E501 (line length is handled via target-version above) and
+# pep8-naming, which clashes with snake-case factory functions used in tests.
+select = ["E", "F", "W", "I"]
+ignore = [
+  "E501",  # line too long — let formatters worry about it
+  "E731",  # lambda assignment — fine for short closures
+]
+
+[tool.ruff.lint.per-file-ignores]
+# server.py intentionally calls logging.basicConfig before FastAPI imports
+# so log config is set before FastAPI installs its own handlers.
+"server.py" = ["E402"]
+# Tests may have unused imports for side effects.
+"tests/*" = ["F401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
