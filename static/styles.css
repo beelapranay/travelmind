@@ -219,6 +219,82 @@
   margin: 1em 0;
 }
 
+/* HITL prefs form */
+#prefsForm:not(.hidden) {
+  animation: prefsFadeIn 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes prefsFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.prefs-intro { margin-bottom: 24px; }
+.prefs-eyebrow {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #c4b5fd;
+  margin-bottom: 8px;
+}
+.prefs-title {
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin-bottom: 6px;
+}
+.prefs-sub { color: #94a3b8; font-size: 0.9rem; line-height: 1.5; }
+
+.prefs-groups { display: flex; flex-direction: column; gap: 22px; margin-bottom: 28px; }
+.prefs-group-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  margin-bottom: 10px;
+}
+.prefs-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+.prefs-chip {
+  flex: 1 1 auto;
+  min-width: 120px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 0.88rem;
+  color: #cbd5e1;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: left;
+}
+.prefs-chip:hover {
+  background: rgba(124, 92, 255, 0.08);
+  border-color: rgba(124, 92, 255, 0.35);
+  color: #f1f5f9;
+}
+.prefs-chip.selected {
+  background: rgba(124, 92, 255, 0.18);
+  border-color: #7c5cff;
+  color: #f1f5f9;
+  box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.4);
+}
+
+.prefs-submit {
+  width: 100%;
+  padding: 14px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #7c5cff, #22d3ee);
+  color: white;
+  font-weight: 600;
+  font-size: 1rem;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.1s;
+}
+.prefs-submit:hover:not(:disabled) { transform: translateY(-1px); }
+.prefs-submit:disabled { opacity: 0.4; cursor: not-allowed; }
+
 /* Example chip */
 .example-chip {
   background: rgba(255, 255, 255, 0.04);

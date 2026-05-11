@@ -1,9 +1,14 @@
 import asyncio
 import json
+import logging
 import threading
 from queue import Queue
+from uuid import uuid4
 
-from fastapi import FastAPI
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("travelmind")
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,6 +32,15 @@ class PlanRequest(BaseModel):
     tavily_key: str
 
 
+class PrefsBody(BaseModel):
+    prefs: dict
+
+
+# In-memory job registry. Suitable for single-process dev; for prod swap with Redis.
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
@@ -36,11 +50,29 @@ async def plan(req: PlanRequest):
     if not req.query.strip() or not req.gemini_key or not req.tavily_key:
         return {"error": "Missing query or API keys"}
 
+    job_id = str(uuid4())
     queue: Queue = Queue()
     SENTINEL = object()
+    prefs_event = threading.Event()
+    prefs_holder: dict = {}
+
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {"event": prefs_event, "prefs": prefs_holder}
 
     def on_event(event_type: str, payload: dict):
+        if event_type in ("prefs_request", "agent_status", "final_plan", "error"):
+            log.info("[%s] event=%s payload=%s", job_id[:8], event_type,
+                     {k: v for k, v in payload.items() if k != "section" and k != "plan"})
         queue.put((event_type, payload))
+
+    def request_prefs(options: dict) -> dict:
+        log.info("[%s] requesting user prefs (HITL gate)", job_id[:8])
+        on_event("prefs_request", {"options": options})
+        # Wait up to 5 minutes for the user to submit; fall back to {} otherwise.
+        signaled = prefs_event.wait(timeout=300)
+        result = prefs_holder.get("value", {})
+        log.info("[%s] prefs received signaled=%s value=%s", job_id[:8], signaled, result)
+        return result
 
     def worker():
         try:
@@ -49,6 +81,7 @@ async def plan(req: PlanRequest):
                 gemini_key=req.gemini_key,
                 tavily_key=req.tavily_key,
                 on_event=on_event,
+                request_prefs=request_prefs,
             )
             queue.put(("done", {
                 "searches": summary["total_searches"],
@@ -57,11 +90,16 @@ async def plan(req: PlanRequest):
         except Exception as e:
             queue.put(("error", {"message": str(e)}))
         finally:
+            with _JOBS_LOCK:
+                _JOBS.pop(job_id, None)
             queue.put(SENTINEL)
 
     threading.Thread(target=worker, daemon=True).start()
 
     async def stream():
+        # Announce session id first so client can post prefs back.
+        yield _sse("session", {"job_id": job_id})
+
         loop = asyncio.get_event_loop()
         while True:
             item = await loop.run_in_executor(None, queue.get)
@@ -73,6 +111,18 @@ async def plan(req: PlanRequest):
                 break
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/api/plan/{job_id}/prefs")
+async def submit_prefs(job_id: str, body: PrefsBody):
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown job")
+    log.info("[%s] prefs submitted: %s", job_id[:8], body.prefs)
+    job["prefs"]["value"] = body.prefs
+    job["event"].set()
+    return {"ok": True}
 
 
 @app.get("/")

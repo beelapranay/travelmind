@@ -78,6 +78,7 @@ const banner = $("statusBanner");
 
 let laneRefs = {};      // id -> { card, list, statusEl }
 let toolCardsByAgent = {}; // id -> Map(query -> card)
+let currentJobId = null;
 
 function buildLanes() {
   lanesEl.innerHTML = "";
@@ -138,6 +139,82 @@ function completeToolCard(agent, query, summary) {
   card.querySelector(".card-preview").textContent = summary || "Done";
 }
 
+// ── Prefs form (HITL gate) ──────────────────────────────────────────────────
+const prefsFormEl = $("prefsForm");
+
+const PREFS_LABELS = {
+  flight: "Flight priority",
+  hotel:  "Hotel tier",
+  pace:   "Trip pace",
+};
+
+function renderPrefsForm(options) {
+  const selected = {};
+
+  prefsFormEl.innerHTML = `
+    <div class="prefs-intro">
+      <div class="prefs-eyebrow">Quick check</div>
+      <h4 class="prefs-title">How do you want this trip dialed in?</h4>
+      <p class="prefs-sub">The agents have done the research. Pick a direction and they'll tailor the final plan.</p>
+    </div>
+    <div id="prefsGroups" class="prefs-groups"></div>
+    <button id="submitPrefs" class="prefs-submit" disabled>
+      <span>Generate plan</span>
+    </button>
+  `;
+
+  const groups = $("prefsGroups");
+  for (const [category, opts] of Object.entries(options)) {
+    const group = document.createElement("div");
+    group.className = "prefs-group";
+    group.innerHTML = `<div class="prefs-group-label">${PREFS_LABELS[category] || category}</div>`;
+    const chips = document.createElement("div");
+    chips.className = "prefs-chips";
+    opts.forEach((opt) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "prefs-chip";
+      chip.textContent = opt.label;
+      chip.onclick = () => {
+        chips.querySelectorAll(".prefs-chip").forEach((c) => c.classList.remove("selected"));
+        chip.classList.add("selected");
+        selected[category] = opt.id;
+        const all = Object.keys(options).every((k) => selected[k]);
+        $("submitPrefs").disabled = !all;
+      };
+      chips.appendChild(chip);
+    });
+    group.appendChild(chips);
+    groups.appendChild(group);
+  }
+
+  $("submitPrefs").onclick = async () => {
+    if (!currentJobId) return;
+    $("submitPrefs").disabled = true;
+    $("submitPrefs").querySelector("span").textContent = "Working...";
+    try {
+      const res = await fetch(`/api/plan/${currentJobId}/prefs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prefs: selected }),
+      });
+      if (!res.ok) throw new Error("Server rejected prefs: " + res.status);
+      prefsFormEl.classList.add("hidden");
+      planLoader.classList.remove("hidden");
+    } catch (e) {
+      showBanner("Could not submit preferences: " + e.message, "error");
+      $("submitPrefs").disabled = false;
+      $("submitPrefs").querySelector("span").textContent = "Generate plan";
+    }
+  };
+
+  planLoader.classList.add("hidden");
+  prefsFormEl.classList.remove("hidden");
+  showBanner("Research complete — pick your preferences below to generate the final plan.");
+  // Scroll the form into view (covers desktop sticky-panel and mobile stacked layouts)
+  setTimeout(() => prefsFormEl.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+}
+
 // ── Plan request ────────────────────────────────────────────────────────────
 function showBanner(msg, kind = "info") {
   banner.textContent = msg;
@@ -160,11 +237,14 @@ async function runPlan() {
   buildLanes();
   planEl.innerHTML = "";
   planEl.classList.add("hidden");
+  prefsFormEl.classList.add("hidden");
+  prefsFormEl.innerHTML = "";
   planLoader.classList.remove("hidden");
   results.classList.remove("hidden");
   stats.classList.add("hidden");
   banner.classList.add("hidden");
   callCount.textContent = "0 searches";
+  currentJobId = null;
   planBtn.disabled = true;
   planBtn.querySelector("span").textContent = "Planning...";
 
@@ -205,7 +285,15 @@ async function runPlan() {
         let data;
         try { data = JSON.parse(dataStr); } catch { continue; }
 
+        console.log("[TravelMind SSE]", eventType, data);
+
         switch (eventType) {
+          case "session":
+            currentJobId = data.job_id;
+            break;
+          case "prefs_request":
+            renderPrefsForm(data.options);
+            break;
           case "agent_status":
             if (data.agent !== "planner") setLaneStatus(data.agent, data.status);
             break;

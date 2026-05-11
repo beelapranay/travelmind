@@ -102,12 +102,34 @@ EventCallback = Callable[[str, dict], None]
 """Signature: on_event(event_type, payload).
 
 Event types:
-  agent_status: {agent, status}              status in {running, done, error}
-  tool_call:    {agent, query}
-  tool_result:  {agent, query, summary, sources_count}
-  section_done: {agent, section}
-  final_plan:   {plan}
+  agent_status:  {agent, status}              status in {running, done, error}
+  tool_call:     {agent, query}
+  tool_result:   {agent, query, summary, sources_count}
+  section_done:  {agent, section}
+  prefs_request: {options}                    blocks awaiting user input
+  final_plan:    {plan}
 """
+
+PrefsRequester = Callable[[dict], dict]
+"""request_prefs(options) -> prefs. Blocks until user submits."""
+
+PREFS_OPTIONS = {
+    "flight": [
+        {"id": "cheapest",      "label": "Cheapest"},
+        {"id": "fastest",       "label": "Fastest"},
+        {"id": "best_layover",  "label": "Best layover"},
+    ],
+    "hotel": [
+        {"id": "budget",   "label": "Budget"},
+        {"id": "comfort",  "label": "Comfort"},
+        {"id": "luxury",   "label": "Luxury"},
+    ],
+    "pace": [
+        {"id": "packed",    "label": "Packed (8+ activities/day)"},
+        {"id": "balanced",  "label": "Balanced"},
+        {"id": "relaxed",   "label": "Relaxed (3 to 4/day)"},
+    ],
+}
 
 
 @dataclass
@@ -224,12 +246,24 @@ SUB_AGENTS = [
 ]
 
 
+def _format_prefs(prefs: dict) -> str:
+    if not prefs:
+        return "(no preferences provided; use sensible defaults)"
+    parts = []
+    for category, value in prefs.items():
+        opts = PREFS_OPTIONS.get(category, [])
+        label = next((o["label"] for o in opts if o["id"] == value), value)
+        parts.append(f"- {category.capitalize()}: {label}")
+    return "\n".join(parts)
+
+
 def run_planner(
     *,
     user_query: str,
     gemini_key: str,
     tavily_key: str,
     on_event: EventCallback,
+    request_prefs: Optional[PrefsRequester] = None,
 ) -> dict:
     """Run the full multi-agent planning pipeline.
 
@@ -269,6 +303,11 @@ def run_planner(
             name = futures[fut]
             results[name] = fut.result()
 
+    # HITL gate: ask user for preferences before synthesis
+    prefs: dict = {}
+    if request_prefs is not None:
+        prefs = request_prefs(PREFS_OPTIONS) or {}
+
     # Synthesize
     flight_sec = results.get("flight", SubAgentResult("flight", "")).section
     hotel_sec = results.get("hotel", SubAgentResult("hotel", "")).section
@@ -276,6 +315,8 @@ def run_planner(
 
     synthesis_input = (
         f"Original request: {user_query}\n\n"
+        f"User preferences:\n{_format_prefs(prefs)}\n\n"
+        f"Apply the preferences when picking the headline flight, hotel default, and itinerary density.\n\n"
         f"=== FlightAgent output ===\n{flight_sec}\n\n"
         f"=== HotelAgent output ===\n{hotel_sec}\n\n"
         f"=== ItineraryAgent output ===\n{itin_sec}\n"
