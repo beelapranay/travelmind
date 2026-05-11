@@ -41,13 +41,16 @@ For each of 2-3 options, use this exact format:
 
 **Option N — Airline(s)**
 - Route: <origin> → <destination> (<layover city if any>)
-- Price: ~$X per person
+- Price: ~<amount> <CURRENCY> per person
 - Duration: Xh Ym total
 - Notes: one short line (red-eye, baggage, etc.)
 
 **Best pick:** one sentence naming the option number and why.
 
-Rules: real airline names. Prices in the requested currency. No prose paragraphs. No text outside `## Flights`."""
+Rules:
+- Use the EXACT currency code provided in the trip constraints (e.g. INR, EUR, USD). Do not substitute a different currency.
+- Do NOT prefix amounts with $ unless the currency is USD.
+- Real airline names. No prose paragraphs. No text outside `## Flights`."""
 
 
 FLIGHT_AGENT_NO_ORIGIN_PROMPT = """You are FlightAgent. The user did NOT provide a departure city for this trip — treat it as a ground-only trip.
@@ -70,12 +73,15 @@ For each of 3 tiers (Budget / Comfort / Luxury), use this exact format:
 
 **Tier — Property name**
 - Neighborhood: <name>
-- Rate: ~$X/night
+- Rate: ~<amount> <CURRENCY>/night
 - Why it fits: one short line
 
 **Default pick:** one sentence naming the tier and why it matches the budget.
 
-Rules: real property names. Prices in USD per night. No prose paragraphs. No text outside `## Accommodation`."""
+Rules:
+- Use the EXACT currency code provided in the trip constraints (e.g. INR, EUR, USD). Do not substitute a different currency.
+- Do NOT prefix amounts with $ unless the currency is USD.
+- Real property names. No prose paragraphs. No text outside `## Accommodation`."""
 
 ITINERARY_AGENT_PROMPT = """You are ItineraryAgent, a specialist in destination experiences.
 
@@ -130,15 +136,17 @@ Output a single markdown document in this exact order. NO preamble, NO commentar
 
 | Category | Estimated Cost | Notes |
 |---|---|---|
-| Flights | $X | per person × N |
-| Lodging | $X | N nights |
-| Food | $X | ~$Y/day |
-| Activities | $X | entries, tours |
-| Transit | $X | local |
-| Buffer | $X | 10% |
-| **Total** | **$X** | vs budget $Y |
+| Flights | <amount> <CURRENCY> | per person × N |
+| Lodging | <amount> <CURRENCY> | N nights |
+| Food | <amount> <CURRENCY> | ~<amount>/day |
+| Activities | <amount> <CURRENCY> | entries, tours |
+| Transit | <amount> <CURRENCY> | local |
+| Buffer | <amount> <CURRENCY> | 10% |
+| **Total** | **<amount> <CURRENCY>** | vs budget <amount> <CURRENCY> |
 
-If the realistic total exceeds the stated budget, add one bold line below the table: **Over budget by $X.** Otherwise add **Within budget.**
+Use the currency code given in the trip constraints (INR, EUR, USD, etc.). Do NOT use $ unless the currency is USD.
+
+If the realistic total exceeds the stated budget, add one bold line below the table: **Over budget by <amount> <CURRENCY>.** Otherwise add **Within budget.**
 
 Rules: do not invent new flights, hotels, or attractions. Only restructure and add Trip Summary + Budget Breakdown. No prose explanations."""
 
@@ -604,18 +612,21 @@ def _format_constraints(
     travel_month: Optional[str],
     origin: Optional[str] = None,
 ) -> str:
-    parts = []
+    """Top-of-query constraint block. Currency line is emphatic to override
+    the template's USD/$ habit."""
+    lines = ["=== Trip constraints (MUST follow) ==="]
+    lines.append(
+        f"Currency: {currency}. Quote ALL prices using the code '{currency}'."
+        + (" Do NOT prefix amounts with $." if currency != "USD" else "")
+    )
     if origin:
-        parts.append(f"Departure city: {origin}.")
+        lines.append(f"Departure city: {origin}.")
     else:
-        parts.append("No departure city provided — do NOT invent flights or assume an origin.")
-    if currency and currency != "USD":
-        parts.append(f"Quote all prices in {currency}.")
+        lines.append("Departure city: NOT PROVIDED. Do NOT invent flights or assume an origin.")
     if travel_month:
-        parts.append(f"Trip travel month: {travel_month}.")
-    if not parts:
-        return ""
-    return "Trip constraints: " + " ".join(parts)
+        lines.append(f"Travel month: {travel_month}.")
+    lines.append("=== End constraints ===")
+    return "\n".join(lines)
 
 
 def _format_prefs(prefs: dict) -> str:
@@ -718,10 +729,15 @@ def run_planner(
         f"Departure city: {origin}.\n" if origin
         else "Departure city: NOT PROVIDED — this is a ground-only trip. Do NOT include a flights row in the budget table; the Flights section will say no flights are planned.\n"
     )
+    currency_directive = (
+        f"Currency: {currency}. EVERY price in the plan and Budget Breakdown table "
+        f"must be quoted in {currency}."
+        + ("" if currency == "USD" else " Do NOT use $ — use the code '" + currency + "'.")
+    )
     synthesis_input = (
         f"Original request: {user_query}\n\n"
+        f"{currency_directive}\n"
         f"{origin_line}"
-        f"Currency for the Budget Breakdown table: {currency}.\n"
         + (f"Travel month: {travel_month}.\n\n" if travel_month else "\n")
         + f"User preferences:\n{_format_prefs(prefs)}\n\n"
         f"Apply the preferences when picking the headline flight, hotel default, and itinerary density.\n\n"
