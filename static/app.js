@@ -64,14 +64,104 @@ bindAutoSave("tavilyKey", "tavily_key", "tavilySaved");
 bindAutoSave("gmapsKey", "gmaps_key", "gmapsSaved");
 
 window.addEventListener("DOMContentLoaded", () => {
+  // Share route: /p/{id} renders a saved plan in read-only mode.
+  const sharedMatch = window.location.pathname.match(/^\/p\/([A-Za-z0-9_.-]+)$/);
+  if (sharedMatch) {
+    loadSharedPlan(sharedMatch[1]);
+    return;
+  }
   if (!localStorage.getItem("gemini_key") || !localStorage.getItem("tavily_key")) {
     $("settingsBtn").click();
   }
+  const savedCurrency = localStorage.getItem("trip_currency");
+  if (savedCurrency && $("currencySelect")) $("currencySelect").value = savedCurrency;
+  const savedMonth = localStorage.getItem("trip_month");
+  if (savedMonth && $("monthSelect")) $("monthSelect").value = savedMonth;
 });
+
+async function loadSharedPlan(planId) {
+  // Hide the input form, hero, examples — show only the plan card.
+  document.querySelectorAll("section").forEach((s) => {
+    if (s.id !== "results") s.classList.add("hidden");
+  });
+  document.querySelector("header")?.classList.add("hidden");
+  results.classList.remove("hidden");
+  planLoader.classList.remove("hidden");
+  planEl.classList.add("hidden");
+  // Hide the agent activity panel (no agent ran for a shared plan).
+  document.getElementById("activity")?.classList.add("hidden");
+  // Lay out the plan card to full width since activity panel is gone.
+  const card = document.getElementById("planCard");
+  card?.classList.remove("md:col-span-3");
+  card?.classList.add("md:col-span-5");
+
+  try {
+    const res = await fetch(`/api/history/${planId}`);
+    if (!res.ok) throw new Error(`Plan not found (HTTP ${res.status})`);
+    const data = await res.json();
+    planLoader.classList.add("hidden");
+    planEl.classList.remove("hidden");
+    planEl.innerHTML = marked.parse(data.plan || "");
+    planEl.dataset.rawMarkdown = data.plan || "";
+    decorateTripSummary(planEl);
+    decorateOptionBlocks(planEl);
+    decorateItinerary(planEl);
+    highlightRealityCheck(planEl);
+    lastSavedPlanId = planId;
+    planActions?.classList.remove("hidden");
+    planActions?.classList.add("flex");
+    showBanner(`Shared trip · saved ${data.created_at || ""}. Want your own? Open the homepage.`);
+  } catch (e) {
+    planLoader.classList.add("hidden");
+    planEl.classList.remove("hidden");
+    planEl.innerHTML = `<p style="color:#fca5a5">Could not load this plan: ${e.message}</p><p><a href="/" style="color:#67e8f9">Plan a new trip →</a></p>`;
+  }
+}
 
 // ── Lane rendering ──────────────────────────────────────────────────────────
 const mcpBar = $("mcpBar");
 const savedNote = $("savedNote");
+const planActions = $("planActions");
+
+let lastSavedPlanId = null;
+
+function downloadCurrentPlan() {
+  const md = planEl.dataset.rawMarkdown || planEl.innerText || "";
+  if (!md) return;
+  const blob = new Blob([md], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const slug = ($("queryInput").value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40) || "trip").replace(/^-|-$/g, "");
+  a.download = `travelmind-${slug}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function copyShareLink() {
+  if (!lastSavedPlanId) {
+    showBanner("Plan hasn't been saved yet.", "error");
+    return;
+  }
+  const url = `${window.location.origin}/p/${lastSavedPlanId}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    const btn = $("copyLinkBtn");
+    if (btn) {
+      const original = btn.textContent;
+      btn.textContent = "Copied";
+      setTimeout(() => { btn.textContent = original; }, 1500);
+    }
+  } catch {
+    showBanner("Could not copy link. Manual URL: " + url, "error");
+  }
+}
+
+$("downloadMdBtn")?.addEventListener("click", downloadCurrentPlan);
+$("printBtn")?.addEventListener("click", () => window.print());
+$("copyLinkBtn")?.addEventListener("click", copyShareLink);
 
 const MCP_LABELS = { tavily: "Tavily MCP", fs: "Filesystem MCP", gmaps: "Google Maps MCP" };
 
@@ -105,6 +195,29 @@ const banner = $("statusBanner");
 let laneRefs = {};      // id -> { card, list, statusEl }
 let toolCardsByAgent = {}; // id -> Map(query -> card)
 let currentJobId = null;
+
+// Streaming synthesis state
+let streamBuffer = "";
+let streamRaf = 0;
+
+function resetStream() {
+  streamBuffer = "";
+  if (streamRaf) {
+    cancelAnimationFrame(streamRaf);
+    streamRaf = 0;
+  }
+}
+
+function renderStreamSoon() {
+  if (streamRaf) return;
+  streamRaf = requestAnimationFrame(() => {
+    streamRaf = 0;
+    planLoader.classList.add("hidden");
+    planEl.classList.remove("hidden");
+    planEl.classList.add("streaming");
+    planEl.innerHTML = marked.parse(streamBuffer);
+  });
+}
 
 function buildLanes() {
   lanesEl.innerHTML = "";
@@ -426,6 +539,10 @@ async function runPlan() {
   mcpBar.classList.add("hidden");
   savedNote.classList.add("hidden");
   savedNote.textContent = "";
+  planActions?.classList.add("hidden");
+  planActions?.classList.remove("flex");
+  lastSavedPlanId = null;
+  delete planEl.dataset.rawMarkdown;
   planBtn.disabled = true;
   planBtn.querySelector("span").textContent = "Planning...";
 
@@ -435,6 +552,11 @@ async function runPlan() {
   let finalSources = 0;
 
   try {
+    const currency = ($("currencySelect")?.value || "USD").trim();
+    const travelMonth = ($("monthSelect")?.value || "").trim();
+    localStorage.setItem("trip_currency", currency);
+    if (travelMonth) localStorage.setItem("trip_month", travelMonth);
+
     const res = await fetch("/api/plan", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -443,6 +565,8 @@ async function runPlan() {
         gemini_key: geminiKey,
         tavily_key: tavilyKey,
         gmaps_key: gmapsKey || null,
+        currency,
+        travel_month: travelMonth || null,
       }),
     });
 
@@ -483,6 +607,10 @@ async function runPlan() {
           case "plan_saved":
             savedNote.textContent = `Plan saved (${data.via}): ${data.path.split("/").slice(-1)[0]}`;
             savedNote.classList.remove("hidden");
+            // path tail without .json is the plan id used by /p/{id} and /api/history/{id}
+            lastSavedPlanId = data.path.split("/").slice(-1)[0].replace(/\.json$/, "");
+            planActions?.classList.remove("hidden");
+            planActions?.classList.add("flex");
             break;
           case "prefs_request":
             renderPrefsForm(data.options);
@@ -501,10 +629,20 @@ async function runPlan() {
           case "section_done":
             // sub-agent finished its section; lane goes done via agent_status
             break;
+          case "plan_start":
+            resetStream();
+            planEl.classList.add("streaming");
+            break;
+          case "plan_chunk":
+            streamBuffer += data.text || "";
+            renderStreamSoon();
+            break;
           case "final_plan":
+            resetStream();
             planLoader.classList.add("hidden");
-            planEl.classList.remove("hidden");
+            planEl.classList.remove("hidden", "streaming");
             planEl.innerHTML = marked.parse(data.plan || "");
+            planEl.dataset.rawMarkdown = data.plan || "";
             decorateTripSummary(planEl);
             decorateOptionBlocks(planEl);
             decorateItinerary(planEl);

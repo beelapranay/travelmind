@@ -53,6 +53,19 @@ Browser ──POST /api/plan──▶ FastAPI
 
 The agent autonomously decides how many searches to run, what to search for next based on prior results, and when it has enough to write the final plan.
 
+## Features
+
+- **Multi-agent orchestration** — 1 planner + 3 specialists (flight/hotel/itinerary) + 1 critic.
+- **Parallel research** — sub-agents run concurrently in a thread pool.
+- **HITL preference gate** — pauses after research, asks for flight/hotel/pace preferences, resumes with them locked in.
+- **Self-correcting plan** — CriticAgent reviews the synthesized plan (JSON verdict), planner revises once if issues found.
+- **MCP tools** — Tavily search, Filesystem persistence, Google Maps (optional). Sub-agents discover tools dynamically.
+- **Streaming synthesis** — final plan paints token-by-token via Gemini streaming + SSE.
+- **Live agent activity** — every tool call and result streamed to a lane UI in real time.
+- **Currency + travel month** — selectors on the input card scope prices and seasonality.
+- **Export & share** — download plan as Markdown, print/save as PDF, copy a shareable `/p/{id}` URL.
+- **Plan history** — saved plans served at `/api/history` and `/api/history/{id}`.
+
 ## Files
 
 - `server.py` — FastAPI app, SSE endpoint, history endpoints

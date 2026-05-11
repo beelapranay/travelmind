@@ -32,6 +32,8 @@ class PlanRequest(BaseModel):
     gemini_key: str
     tavily_key: str
     gmaps_key: str | None = None
+    currency: str = "USD"
+    travel_month: str | None = None
 
 
 class PrefsBody(BaseModel):
@@ -62,9 +64,9 @@ async def plan(req: PlanRequest):
         _JOBS[job_id] = {"event": prefs_event, "prefs": prefs_holder}
 
     def on_event(event_type: str, payload: dict):
-        if event_type in ("prefs_request", "agent_status", "final_plan", "error", "mcp_status", "plan_saved"):
+        if event_type in ("prefs_request", "agent_status", "final_plan", "error", "mcp_status", "plan_saved", "plan_start"):
             log.info("[%s] event=%s payload=%s", job_id[:8], event_type,
-                     {k: v for k, v in payload.items() if k not in ("section", "plan")})
+                     {k: v for k, v in payload.items() if k not in ("section", "plan", "text")})
         queue.put((event_type, payload))
 
     def request_prefs(options: dict) -> dict:
@@ -83,6 +85,8 @@ async def plan(req: PlanRequest):
                 gemini_key=req.gemini_key,
                 tavily_key=req.tavily_key,
                 gmaps_key=(req.gmaps_key or None),
+                currency=req.currency,
+                travel_month=req.travel_month,
                 on_event=on_event,
                 request_prefs=request_prefs,
             )
@@ -166,6 +170,12 @@ async def history_item(plan_id: str):
 
 @app.get("/")
 async def root():
+    return FileResponse("static/index.html")
+
+
+@app.get("/p/{plan_id}")
+async def shared_plan_page(plan_id: str):
+    """Public share route. Returns the SPA; client-side JS fetches the plan."""
     return FileResponse("static/index.html")
 
 

@@ -261,7 +261,9 @@ Event types:
   section_done:  {agent, section}
   prefs_request: {options}                    blocks awaiting user input
   critique:      {approved, issues, critique}
-  final_plan:    {plan, revised?}
+  plan_start:    {revised}                    streaming about to begin
+  plan_chunk:    {text, revised}              incremental synthesis text
+  final_plan:    {plan, revised?}             complete synthesis
   mcp_status:    {server, status, tools?, message?}
   plan_saved:    {path, via}                  via in {mcp, direct}
 """
@@ -591,6 +593,17 @@ SUB_AGENTS = [
 ]
 
 
+def _format_constraints(*, currency: str, travel_month: Optional[str]) -> str:
+    parts = []
+    if currency and currency != "USD":
+        parts.append(f"Quote all prices in {currency}.")
+    if travel_month:
+        parts.append(f"Trip travel month: {travel_month}.")
+    if not parts:
+        return ""
+    return "Trip constraints: " + " ".join(parts)
+
+
 def _format_prefs(prefs: dict) -> str:
     if not prefs:
         return "(no preferences provided; use sensible defaults)"
@@ -610,6 +623,8 @@ def run_planner(
     on_event: EventCallback,
     request_prefs: Optional[PrefsRequester] = None,
     gmaps_key: Optional[str] = None,
+    currency: str = "USD",
+    travel_month: Optional[str] = None,
 ) -> dict:
     """Run the full multi-agent planning pipeline.
 
@@ -630,6 +645,10 @@ def run_planner(
 
     on_event("agent_status", {"agent": "planner", "status": "running"})
 
+    # Prepend structured hints to each sub-agent's view of the user query.
+    constraints = _format_constraints(currency=currency, travel_month=travel_month)
+    enriched_query = (constraints + "\n\n" + user_query).strip() if constraints else user_query
+
     results: dict[str, SubAgentResult] = {}
     lock = threading.Lock()
 
@@ -644,7 +663,7 @@ def run_planner(
                     _run_sub_agent,
                     name=name,
                     system_prompt=prompt,
-                    user_query=user_query,
+                    user_query=enriched_query,
                     gemini_client=gemini_client,
                     tavily_client=tavily_client,
                     mcp=mcp,
@@ -672,24 +691,22 @@ def run_planner(
 
     synthesis_input = (
         f"Original request: {user_query}\n\n"
-        f"User preferences:\n{_format_prefs(prefs)}\n\n"
+        f"Currency for the Budget Breakdown table: {currency}.\n"
+        + (f"Travel month: {travel_month}.\n\n" if travel_month else "\n")
+        + f"User preferences:\n{_format_prefs(prefs)}\n\n"
         f"Apply the preferences when picking the headline flight, hotel default, and itinerary density.\n\n"
         f"=== FlightAgent output ===\n{flight_sec}\n\n"
         f"=== HotelAgent output ===\n{hotel_sec}\n\n"
         f"=== ItineraryAgent output ===\n{itin_sec}\n"
     )
 
-    final_response = gemini_client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=[types.Content(role="user", parts=[types.Part.from_text(text=synthesis_input)])],
-        config=types.GenerateContentConfig(
-            system_instruction=PLANNER_SYNTHESIS_PROMPT,
-            max_output_tokens=8192,
-        ),
+    final_plan = _stream_synthesis(
+        gemini_client=gemini_client,
+        system_prompt=PLANNER_SYNTHESIS_PROMPT,
+        user_input=synthesis_input,
+        on_event=on_event,
+        revised=False,
     )
-
-    final_plan = final_response.text or "Final synthesis returned empty."
-    on_event("final_plan", {"plan": final_plan})
     on_event("agent_status", {"agent": "planner", "status": "done"})
 
     # CriticAgent: review plan, revise once if issues found.
@@ -725,6 +742,59 @@ def run_planner(
 
 
 # ── CriticAgent ─────────────────────────────────────────────────────────────
+
+def _stream_synthesis(
+    *,
+    gemini_client,
+    system_prompt: str,
+    user_input: str,
+    on_event: EventCallback,
+    revised: bool,
+) -> str:
+    """Stream a synthesis pass token-by-token. Emits plan_chunk events.
+
+    Falls back to a single emit if streaming is unavailable. Always emits
+    a final `final_plan` with the complete text so the frontend can swap
+    its progressively-rendered version for the post-processed structured
+    cards.
+    """
+    on_event("plan_start", {"revised": revised})
+    parts: list[str] = []
+
+    try:
+        stream = gemini_client.models.generate_content_stream(
+            model=GEMINI_MODEL,
+            contents=[types.Content(role="user", parts=[types.Part.from_text(text=user_input)])],
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=8192,
+            ),
+        )
+        for chunk in stream:
+            text = getattr(chunk, "text", None) or ""
+            if not text:
+                continue
+            parts.append(text)
+            on_event("plan_chunk", {"text": text, "revised": revised})
+    except Exception as e:
+        log.warning("Synthesis stream failed (%s); falling back to blocking call.", e)
+        try:
+            resp = gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=user_input)])],
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    max_output_tokens=8192,
+                ),
+            )
+            parts.append(resp.text or "")
+        except Exception as e2:
+            log.warning("Synthesis blocking fallback also failed: %s", e2)
+
+    full = "".join(parts) or "Synthesis returned empty."
+    on_event("final_plan", {"plan": full, "revised": revised})
+    return full
+
 
 def _parse_critic_json(raw: str) -> Optional[dict]:
     """Robust parse for the critic's JSON verdict.
@@ -823,20 +893,17 @@ def _critique_and_revise(
     )
 
     try:
-        revised = gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[types.Content(role="user", parts=[types.Part.from_text(text=revision_input)])],
-            config=types.GenerateContentConfig(
-                system_instruction=PLANNER_REVISION_PROMPT,
-                max_output_tokens=8192,
-            ),
+        revised_plan = _stream_synthesis(
+            gemini_client=gemini_client,
+            system_prompt=PLANNER_REVISION_PROMPT,
+            user_input=revision_input,
+            on_event=on_event,
+            revised=True,
         )
-        revised_plan = revised.text or plan
     except Exception as e:
         on_event("agent_status", {"agent": "critic", "status": "error", "message": str(e)})
         return plan
 
-    on_event("final_plan", {"plan": revised_plan, "revised": True})
     on_event("agent_status", {"agent": "planner", "status": "done"})
     on_event("agent_status", {"agent": "critic", "status": "done"})
     return revised_plan
