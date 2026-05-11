@@ -11,6 +11,7 @@ const LANES = [
   { id: "flight",    label: "FlightAgent",    desc: "Routes, airlines, prices" },
   { id: "hotel",     label: "HotelAgent",     desc: "Lodging within budget" },
   { id: "itinerary", label: "ItineraryAgent", desc: "Sights, food, weather" },
+  { id: "critic",    label: "CriticAgent",    desc: "Reviews + revises plan" },
 ];
 
 // ── Examples chips ──────────────────────────────────────────────────────────
@@ -137,6 +138,133 @@ function completeToolCard(agent, query, summary) {
   const spinner = card.querySelector(".card-spinner");
   if (spinner) spinner.outerHTML = '<span class="card-done">done</span>';
   card.querySelector(".card-preview").textContent = summary || "Done";
+}
+
+function decorateTripSummary(root) {
+  const heads = root.querySelectorAll("h2");
+  for (const h of heads) {
+    if (!/trip summary/i.test(h.textContent || "")) continue;
+    const ul = h.nextElementSibling;
+    if (!ul || ul.tagName !== "UL") continue;
+    const grid = document.createElement("div");
+    grid.className = "trip-summary-grid";
+    ul.querySelectorAll("li").forEach((li) => {
+      const m = (li.textContent || "").match(/^([^:]+):\s*(.*)$/);
+      if (!m) return;
+      const cell = document.createElement("div");
+      cell.className = "trip-summary-cell";
+      cell.innerHTML = `<div class="ts-label">${m[1].trim()}</div><div class="ts-value">${m[2].trim()}</div>`;
+      grid.appendChild(cell);
+    });
+    if (grid.children.length) {
+      ul.parentNode.replaceChild(grid, ul);
+    }
+    break;
+  }
+}
+
+function decorateOptionBlocks(root) {
+  // Wrap "**Option N — X**" / "**Tier — X**" headings (rendered as <p><strong>...</strong></p>)
+  // followed by a <ul> into a card.
+  const paras = Array.from(root.querySelectorAll("p"));
+  paras.forEach((p) => {
+    if (p.children.length !== 1 || p.firstElementChild.tagName !== "STRONG") return;
+    const label = p.firstElementChild.textContent || "";
+    const m = label.match(/^(Option\s*\d+|Budget|Comfort|Luxury)\s*[—–-]\s*(.+)$/i);
+    if (!m) return;
+    const ul = p.nextElementSibling;
+    if (!ul || ul.tagName !== "UL") return;
+
+    const card = document.createElement("div");
+    card.className = "opt-card";
+    p.parentNode.insertBefore(card, p);
+
+    const header = document.createElement("div");
+    header.className = "opt-header";
+    header.innerHTML = `<span class="opt-badge">${m[1].trim()}</span><span class="opt-title">${m[2].trim()}</span>`;
+    card.appendChild(header);
+    card.appendChild(ul);
+    p.remove();
+
+    ul.querySelectorAll("li").forEach((li) => {
+      const html = li.innerHTML;
+      const tm = html.match(/^([^:<]{2,30}):\s*(.*)$/s);
+      if (tm) {
+        li.innerHTML = `<span class="opt-key">${tm[1].trim()}</span><span class="opt-val">${tm[2]}</span>`;
+        li.classList.add("opt-row");
+      }
+    });
+  });
+}
+
+function decorateItinerary(root) {
+  const heads = root.querySelectorAll("h3");
+  for (const h of heads) {
+    if (!/^\s*day\s*\d+/i.test(h.textContent || "")) continue;
+    const ul = h.nextElementSibling;
+    if (!ul || ul.tagName !== "UL") continue;
+
+    // Wrap h3 + ul into a day card.
+    const card = document.createElement("div");
+    card.className = "day-card";
+    h.parentNode.insertBefore(card, h);
+    card.appendChild(h);
+    card.appendChild(ul);
+
+    // Split "Day N — Theme" into badge + title.
+    const m = (h.textContent || "").match(/^\s*(day\s*\d+)\s*[—–-]?\s*(.*)$/i);
+    if (m) {
+      h.innerHTML = `<span class="day-badge">${m[1].trim()}</span><span class="day-theme">${m[2].trim()}</span>`;
+    }
+
+    // Tag each bullet's time label.
+    ul.querySelectorAll("li").forEach((li) => {
+      const html = li.innerHTML;
+      const tm = html.match(/^([^:<]{2,30}):\s*(.*)$/s);
+      if (tm) {
+        li.innerHTML = `<span class="time-label">${tm[1].trim()}</span><span class="time-body">${tm[2]}</span>`;
+        li.classList.add("itin-row");
+      }
+    });
+  }
+}
+
+function highlightRealityCheck(root) {
+  const heads = root.querySelectorAll("h2");
+  for (const h of heads) {
+    if (!/reality check/i.test(h.textContent || "")) continue;
+    const callout = document.createElement("div");
+    callout.className = "reality-callout";
+    const head = document.createElement("div");
+    head.className = "reality-head";
+    head.innerHTML = `<span class="reality-icon">!</span><span>Reality Check</span>`;
+    callout.appendChild(head);
+    let n = h.nextElementSibling;
+    h.remove();
+    while (n && n.tagName !== "H2") {
+      const next = n.nextElementSibling;
+      callout.appendChild(n);
+      n = next;
+    }
+    if (n) n.parentNode.insertBefore(callout, n);
+    else root.appendChild(callout);
+    break;
+  }
+}
+
+function renderCritique({ approved, issues, critique }) {
+  const ref = laneRefs["critic"];
+  if (!ref) return;
+  const card = document.createElement("div");
+  card.className = "activity-card completed critic-card " + (approved ? "critic-ok" : "critic-fix");
+  const header = approved ? "Approved" : "Issues found — revising";
+  const bullets = (issues || []).map((i) => `<li>${i}</li>`).join("");
+  card.innerHTML = `
+    <div class="card-query"><span class="card-done">${approved ? "ok" : "fix"}</span><span>${header}</span></div>
+    <div class="card-preview">${critique || ""}</div>
+    ${bullets ? `<ul class="critic-issues">${bullets}</ul>` : ""}
+  `;
+  ref.list.appendChild(card);
 }
 
 // ── Prefs form (HITL gate) ──────────────────────────────────────────────────
@@ -312,6 +440,14 @@ async function runPlan() {
             planLoader.classList.add("hidden");
             planEl.classList.remove("hidden");
             planEl.innerHTML = marked.parse(data.plan || "");
+            decorateTripSummary(planEl);
+            decorateOptionBlocks(planEl);
+            decorateItinerary(planEl);
+            highlightRealityCheck(planEl);
+            if (data.revised) showBanner("Plan revised after CriticAgent review.");
+            break;
+          case "critique":
+            renderCritique(data);
             break;
           case "done":
             finalSearches = data.searches;
