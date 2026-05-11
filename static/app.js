@@ -68,6 +68,29 @@ window.addEventListener("DOMContentLoaded", () => {
 });
 
 // ── Lane rendering ──────────────────────────────────────────────────────────
+const mcpBar = $("mcpBar");
+const savedNote = $("savedNote");
+
+const MCP_LABELS = { tavily: "Tavily MCP", fs: "Filesystem MCP" };
+
+function setMcpStatus(server, status, message) {
+  let chip = mcpBar.querySelector(`[data-mcp="${server}"]`);
+  if (!chip) {
+    chip = document.createElement("span");
+    chip.dataset.mcp = server;
+    chip.className = "mcp-chip";
+    mcpBar.appendChild(chip);
+    mcpBar.classList.remove("hidden");
+  }
+  chip.classList.remove("mcp-ok", "mcp-err");
+  chip.classList.add(status === "ready" ? "mcp-ok" : "mcp-err");
+  const label = MCP_LABELS[server] || server;
+  chip.innerHTML = status === "ready"
+    ? `<span class="mcp-dot"></span>${label}`
+    : `<span class="mcp-dot"></span>${label} <span class="mcp-err-msg">offline</span>`;
+  if (message) chip.title = message;
+}
+
 const lanesEl = $("lanes");
 const planBtn = $("planBtn");
 const callCount = $("callCount");
@@ -141,23 +164,44 @@ function completeToolCard(agent, query, summary) {
 }
 
 function decorateTripSummary(root) {
+  const STANDARD = new Set(["destination", "dates", "travelers", "budget"]);
   const heads = root.querySelectorAll("h2");
   for (const h of heads) {
     if (!/trip summary/i.test(h.textContent || "")) continue;
     const ul = h.nextElementSibling;
     if (!ul || ul.tagName !== "UL") continue;
+
     const grid = document.createElement("div");
     grid.className = "trip-summary-grid";
+    const extras = [];
+
     ul.querySelectorAll("li").forEach((li) => {
-      const m = (li.textContent || "").match(/^([^:]+):\s*(.*)$/);
+      const m = (li.textContent || "").match(/^([^:]+):\s*([\s\S]*)$/);
       if (!m) return;
-      const cell = document.createElement("div");
-      cell.className = "trip-summary-cell";
-      cell.innerHTML = `<div class="ts-label">${m[1].trim()}</div><div class="ts-value">${m[2].trim()}</div>`;
-      grid.appendChild(cell);
+      const key = m[1].trim();
+      const val = m[2].trim();
+      if (STANDARD.has(key.toLowerCase())) {
+        const cell = document.createElement("div");
+        cell.className = "trip-summary-cell";
+        cell.innerHTML = `<div class="ts-label">${key}</div><div class="ts-value">${val}</div>`;
+        grid.appendChild(cell);
+      } else {
+        extras.push({ key, val });
+      }
     });
-    if (grid.children.length) {
-      ul.parentNode.replaceChild(grid, ul);
+
+    const replacement = document.createDocumentFragment();
+    if (grid.children.length) replacement.appendChild(grid);
+    if (extras.length) {
+      const note = document.createElement("div");
+      note.className = "trip-summary-note";
+      note.innerHTML = extras
+        .map((e) => `<span class="ts-note-key">${e.key}:</span> ${e.val}`)
+        .join("<br/>");
+      replacement.appendChild(note);
+    }
+    if (replacement.childNodes.length) {
+      ul.parentNode.replaceChild(replacement, ul);
     }
     break;
   }
@@ -217,12 +261,14 @@ function decorateItinerary(root) {
       h.innerHTML = `<span class="day-badge">${m[1].trim()}</span><span class="day-theme">${m[2].trim()}</span>`;
     }
 
-    // Tag each bullet's time label.
-    ul.querySelectorAll("li").forEach((li) => {
+    // Tag each top-level bullet's time label.
+    // Match: leading word(s), optional parenthesized time range, then ":".
+    // Body may contain nested <ul> which we keep intact.
+    Array.from(ul.children).filter((c) => c.tagName === "LI").forEach((li) => {
       const html = li.innerHTML;
-      const tm = html.match(/^([^:<]{2,30}):\s*(.*)$/s);
+      const tm = html.match(/^([A-Za-z][A-Za-z &/-]{1,25})\s*(?:\([^)]*\))?\s*:\s*([\s\S]*)$/);
       if (tm) {
-        li.innerHTML = `<span class="time-label">${tm[1].trim()}</span><span class="time-body">${tm[2]}</span>`;
+        li.innerHTML = `<span class="time-label">${tm[1].trim()}</span><div class="time-body">${tm[2]}</div>`;
         li.classList.add("itin-row");
       }
     });
@@ -373,6 +419,10 @@ async function runPlan() {
   banner.classList.add("hidden");
   callCount.textContent = "0 searches";
   currentJobId = null;
+  mcpBar.innerHTML = "";
+  mcpBar.classList.add("hidden");
+  savedNote.classList.add("hidden");
+  savedNote.textContent = "";
   planBtn.disabled = true;
   planBtn.querySelector("span").textContent = "Planning...";
 
@@ -418,6 +468,13 @@ async function runPlan() {
         switch (eventType) {
           case "session":
             currentJobId = data.job_id;
+            break;
+          case "mcp_status":
+            setMcpStatus(data.server, data.status, data.message);
+            break;
+          case "plan_saved":
+            savedNote.textContent = `Plan saved (${data.via}): ${data.path.split("/").slice(-1)[0]}`;
+            savedNote.classList.remove("hidden");
             break;
           case "prefs_request":
             renderPrefsForm(data.options);

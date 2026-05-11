@@ -89,13 +89,14 @@ tailwind.config = {
   <section id="results" class="hidden grid md:grid-cols-5 gap-6 mb-12 items-start">
     <!-- Agent activity -->
     <div id="activity" class="md:col-span-2 glass rounded-2xl p-5 sm:p-6 md:sticky md:top-6 md:self-start md:max-h-[calc(100vh-3rem)] md:overflow-y-auto">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between mb-3">
         <h3 class="font-display font-semibold text-lg flex items-center gap-2">
           <span class="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" id="liveDot"></span>
           Agent Activity
         </h3>
         <span id="callCount" class="text-xs text-slate-400">0 searches</span>
       </div>
+      <div id="mcpBar" class="mcp-bar hidden"></div>
       <div id="lanes" class="space-y-4"></div>
     </div>
 
@@ -132,7 +133,8 @@ tailwind.config = {
   </section>
 
   <footer class="text-center text-xs text-slate-500 py-6">
-    Powered by Gemini 2.5 Flash · Tavily Search
+    <div>Powered by Gemini 2.5 Flash · Tavily Search · MCP</div>
+    <div id="savedNote" class="hidden mt-1 text-slate-600"></div>
   </footer>
 </div>
 

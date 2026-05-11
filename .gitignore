@@ -22,6 +22,9 @@ env/
 *.log
 logs/
 
+# Saved plans
+data/plans/
+
 # OS and editor files
 .DS_Store
 .idea/

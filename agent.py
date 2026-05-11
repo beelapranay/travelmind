@@ -8,13 +8,24 @@ section. The Planner finally synthesizes the sections into a unified plan.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
+import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from google import genai
 from google.genai import types
+
+from mcp_client import MCPManager
+
+log = logging.getLogger("travelmind.agent")
+
+PLANS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", "plans"))
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
@@ -64,16 +75,19 @@ Your job: research attractions, food, weather, transit. Run 3 to 5 targeted web 
 For each day, use this exact format:
 
 ### Day N — <theme or neighborhood>
-- Morning: <activity / place>
-- Afternoon: <activity / place>
-- Evening: <activity / place>
+- Morning: <one short sentence, or a sub-list of 2-3 activities>
+- Afternoon: <one short sentence, or a sub-list of 2-3 activities>
+- Evening: <one short sentence, or a sub-list of 2-3 activities>
 - Eat: <one specific restaurant>
 
 After all days:
 
 **Weather & packing:** 2-3 short bullets — typical temps for the trip month, rain risk, what to bring.
 
-Rules: real place names, real restaurants. No prose paragraphs. No text outside `## Itinerary`."""
+Rules:
+- Use ONLY the labels "Morning", "Afternoon", "Evening", "Eat". Do NOT add parenthesized time ranges like "(8:00 AM - 12:00 PM)" after the label.
+- Real place names, real restaurants.
+- No prose paragraphs. No text outside `## Itinerary`."""
 
 PLANNER_SYNTHESIS_PROMPT = """You are PlannerAgent, the orchestrator. Three specialists produced research sections. Compose the final plan.
 
@@ -84,6 +98,8 @@ Output a single markdown document in this exact order. NO preamble, NO commentar
 - Dates: <month/duration>
 - Travelers: <count>
 - Budget: $<total> total
+
+(Exactly these 4 bullets. Do NOT add notes, caveats, or extra bullets inside Trip Summary. Caveats go in the `## Reality Check` section only if absolutely required.)
 
 ## Flights
 (insert FlightAgent's section verbatim, keeping its bullets)
@@ -192,11 +208,13 @@ EventCallback = Callable[[str, dict], None]
 Event types:
   agent_status:  {agent, status}              status in {running, done, error}
   tool_call:     {agent, query}
-  tool_result:   {agent, query, summary, sources_count}
+  tool_result:   {agent, query, summary, sources_count, source}
   section_done:  {agent, section}
   prefs_request: {options}                    blocks awaiting user input
   critique:      {approved, issues, critique}
   final_plan:    {plan, revised?}
+  mcp_status:    {server, status, tools?, message?}
+  plan_saved:    {path, via}                  via in {mcp, direct}
 """
 
 PrefsRequester = Callable[[dict], dict]
@@ -230,6 +248,92 @@ class SubAgentResult:
 
 # ── Sub-agent runner ────────────────────────────────────────────────────────
 
+def _perform_web_search(
+    *,
+    query: str,
+    mcp: Optional[MCPManager],
+    tavily_client,
+) -> tuple[str, str, int, str]:
+    """Run a single web search. Returns (formatted_content, summary, sources_count, source).
+
+    Tries MCP Tavily server first; falls back to direct Tavily SDK on any failure.
+    `source` is one of {"mcp", "sdk"} for telemetry.
+    """
+    if mcp is not None and mcp.has_server("tavily"):
+        try:
+            tool_name = _resolve_tavily_tool(mcp)
+            raw = mcp.call_tool("tavily", tool_name, {"query": query, "max_results": 5, "search_depth": "advanced"}, timeout=45)
+            results_list = _parse_tavily_mcp_result(raw)
+            if results_list:
+                formatted = [
+                    f"**{r.get('title','')}**\n{(r.get('content') or '')[:300]}\nSource: {r.get('url','')}"
+                    for r in results_list
+                ]
+                return (
+                    "\n\n".join(formatted),
+                    (results_list[0].get("content") or "")[:150],
+                    len(results_list),
+                    "mcp",
+                )
+            # If parsing yields nothing, surface raw text to the model instead of erroring.
+            if raw:
+                return (raw[:2000], raw[:150], 1, "mcp")
+        except Exception as e:
+            log.warning("MCP tavily call failed, falling back to SDK: %s", e)
+
+    # SDK fallback
+    result = tavily_client.search(query, max_results=5, search_depth="advanced")
+    results_list = result.get("results", [])
+    formatted = [
+        f"**{r.get('title','')}**\n{(r.get('content') or '')[:300]}\nSource: {r.get('url','')}"
+        for r in results_list
+    ]
+    return (
+        "\n\n".join(formatted) if formatted else "No results found.",
+        (results_list[0].get("content") or "")[:150] if results_list else "No data",
+        len(results_list),
+        "sdk",
+    )
+
+
+def _resolve_tavily_tool(mcp: MCPManager) -> str:
+    """Pick the right search-tool name from the Tavily MCP server."""
+    tools = mcp.list_tools("tavily")
+    names = [t["name"] for t in tools]
+    for candidate in ("tavily-search", "tavily_search", "search"):
+        if candidate in names:
+            return candidate
+    # Fall back to the first tool whose name contains 'search'.
+    for n in names:
+        if "search" in n.lower():
+            return n
+    raise RuntimeError(f"No search tool exposed by Tavily MCP. Available: {names}")
+
+
+def _parse_tavily_mcp_result(raw: str) -> list[dict]:
+    """Tavily MCP returns text content. Try JSON first; otherwise return empty."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        # Some MCP servers wrap JSON in a code fence or prefix; try to extract.
+        m = re.search(r"\{[\s\S]*\}|\[[\s\S]*\]", raw)
+        if not m:
+            return []
+        try:
+            data = json.loads(m.group(0))
+        except Exception:
+            return []
+    if isinstance(data, dict):
+        if isinstance(data.get("results"), list):
+            return data["results"]
+        return []
+    if isinstance(data, list):
+        return data
+    return []
+
+
 def _run_sub_agent(
     *,
     name: str,
@@ -237,6 +341,7 @@ def _run_sub_agent(
     user_query: str,
     gemini_client,
     tavily_client,
+    mcp: Optional[MCPManager],
     on_event: EventCallback,
     max_iterations: int = 6,
 ) -> SubAgentResult:
@@ -285,28 +390,21 @@ def _run_sub_agent(
                 on_event("tool_call", {"agent": name, "query": query})
 
                 try:
-                    result = tavily_client.search(query, max_results=5, search_depth="advanced")
-                    results_list = result.get("results", [])
-                    formatted = []
-                    for r in results_list:
-                        title = r.get("title", "")
-                        content = r.get("content", "")[:300]
-                        url = r.get("url", "")
-                        formatted.append(f"**{title}**\n{content}\nSource: {url}")
-                    search_content = "\n\n".join(formatted) if formatted else "No results found."
-                    summary = results_list[0].get("content", "")[:150] if results_list else "No data"
-                    sources_count = len(results_list)
+                    search_content, summary, sources_count, source = _perform_web_search(
+                        query=query, mcp=mcp, tavily_client=tavily_client,
+                    )
                 except Exception as e:
                     search_content = f"Search failed: {e}"
                     summary = "Search failed"
                     sources_count = 0
+                    source = "error"
 
                 on_event("tool_result", {
                     "agent": name, "query": query,
-                    "summary": summary, "sources_count": sources_count,
+                    "summary": summary, "sources_count": sources_count, "source": source,
                 })
 
-                tool_calls.append({"query": query, "summary": summary, "sources_count": sources_count})
+                tool_calls.append({"query": query, "summary": summary, "sources_count": sources_count, "source": source})
 
                 response_parts.append(
                     types.Part.from_function_response(
@@ -356,7 +454,7 @@ def run_planner(
 ) -> dict:
     """Run the full multi-agent planning pipeline.
 
-    Returns: {plan, total_searches, total_sources}
+    Returns: {plan, total_searches, total_sources, plan_path}
     """
     try:
         from tavily import TavilyClient
@@ -365,6 +463,11 @@ def run_planner(
 
     gemini_client = genai.Client(api_key=gemini_key)
     tavily_client = TavilyClient(api_key=tavily_key)
+
+    # Spin up MCP servers for this job. Failures are non-fatal: sub-agents
+    # fall back to the direct Tavily SDK and persistence is skipped.
+    os.makedirs(PLANS_DIR, exist_ok=True)
+    mcp = _init_mcp(tavily_key=tavily_key, on_event=on_event)
 
     on_event("agent_status", {"agent": "planner", "status": "running"})
 
@@ -375,22 +478,28 @@ def run_planner(
         with lock:
             on_event(event_type, payload)
 
-    with ThreadPoolExecutor(max_workers=len(SUB_AGENTS)) as pool:
-        futures = {
-            pool.submit(
-                _run_sub_agent,
-                name=name,
-                system_prompt=prompt,
-                user_query=user_query,
-                gemini_client=gemini_client,
-                tavily_client=tavily_client,
-                on_event=safe_emit,
-            ): name
-            for name, prompt in SUB_AGENTS
-        }
-        for fut in as_completed(futures):
-            name = futures[fut]
-            results[name] = fut.result()
+    try:
+        with ThreadPoolExecutor(max_workers=len(SUB_AGENTS)) as pool:
+            futures = {
+                pool.submit(
+                    _run_sub_agent,
+                    name=name,
+                    system_prompt=prompt,
+                    user_query=user_query,
+                    gemini_client=gemini_client,
+                    tavily_client=tavily_client,
+                    mcp=mcp,
+                    on_event=safe_emit,
+                ): name
+                for name, prompt in SUB_AGENTS
+            }
+            for fut in as_completed(futures):
+                name = futures[fut]
+                results[name] = fut.result()
+    except Exception:
+        if mcp is not None:
+            mcp.close()
+        raise
 
     # HITL gate: ask user for preferences before synthesis
     prefs: dict = {}
@@ -433,6 +542,18 @@ def run_planner(
         on_event=on_event,
     )
 
+    # Persist via Filesystem MCP if available. Falls back to direct write.
+    plan_path = _save_plan(
+        mcp=mcp,
+        user_query=user_query,
+        prefs=prefs,
+        plan=final_plan,
+        on_event=on_event,
+    )
+
+    if mcp is not None:
+        mcp.close()
+
     total_searches = sum(len(r.tool_calls) for r in results.values())
     total_sources = sum(c.get("sources_count", 0) for r in results.values() for c in r.tool_calls)
 
@@ -440,10 +561,37 @@ def run_planner(
         "plan": final_plan,
         "total_searches": total_searches,
         "total_sources": total_sources,
+        "plan_path": plan_path,
     }
 
 
 # ── CriticAgent ─────────────────────────────────────────────────────────────
+
+def _parse_critic_json(raw: str) -> Optional[dict]:
+    """Robust parse for the critic's JSON verdict.
+
+    Handles: bare JSON, ```json fences, leading/trailing prose, single-quote drift.
+    Returns None if no usable object can be extracted.
+    """
+    if not raw:
+        return None
+    candidates: list[str] = [raw]
+    fence = re.search(r"```(?:json)?\s*([\s\S]+?)```", raw)
+    if fence:
+        candidates.append(fence.group(1))
+    obj = re.search(r"\{[\s\S]*\}", raw)
+    if obj:
+        candidates.append(obj.group(0))
+    for c in candidates:
+        c = c.strip()
+        try:
+            parsed = json.loads(c)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            continue
+    return None
+
 
 def _critique_and_revise(
     *,
@@ -454,8 +602,6 @@ def _critique_and_revise(
     on_event: EventCallback,
 ) -> str:
     """Run CriticAgent on the plan. Revise once if not approved. Returns final plan."""
-    import json as _json
-
     on_event("agent_status", {"agent": "critic", "status": "running"})
 
     critic_input = (
@@ -470,18 +616,32 @@ def _critique_and_revise(
             contents=[types.Content(role="user", parts=[types.Part.from_text(text=critic_input)])],
             config=types.GenerateContentConfig(
                 system_instruction=CRITIC_AGENT_PROMPT,
-                max_output_tokens=2048,
+                max_output_tokens=4096,
                 response_mime_type="application/json",
             ),
         )
         raw = (critic_response.text or "").strip()
-        verdict = _json.loads(raw)
-        approved = bool(verdict.get("approved", False))
-        issues = verdict.get("issues") or []
-        critique_text = verdict.get("critique", "")
+        finish_reason = None
+        if critic_response.candidates:
+            fr = getattr(critic_response.candidates[0], "finish_reason", None)
+            finish_reason = str(fr) if fr is not None else None
+        log.info("critic raw len=%d finish=%s", len(raw), finish_reason)
     except Exception as e:
-        on_event("agent_status", {"agent": "critic", "status": "error", "message": str(e)})
+        log.warning("Critic API call failed: %s", e)
+        on_event("agent_status", {"agent": "critic", "status": "error", "message": f"API: {e}"})
         return plan
+
+    verdict = _parse_critic_json(raw)
+    if verdict is None:
+        log.warning("Critic JSON unparseable. finish=%s len=%d raw[:800]=%r",
+                    finish_reason, len(raw), raw[:800])
+        msg = f"Could not parse critic JSON (finish={finish_reason}). Keeping original plan."
+        on_event("agent_status", {"agent": "critic", "status": "error", "message": msg})
+        return plan
+
+    approved = bool(verdict.get("approved", False))
+    issues = verdict.get("issues") or []
+    critique_text = verdict.get("critique", "")
 
     on_event("critique", {
         "approved": approved,
@@ -521,3 +681,84 @@ def _critique_and_revise(
     on_event("agent_status", {"agent": "planner", "status": "done"})
     on_event("agent_status", {"agent": "critic", "status": "done"})
     return revised_plan
+
+
+# ── MCP bootstrap + persistence ─────────────────────────────────────────────
+
+def _init_mcp(*, tavily_key: str, on_event: EventCallback) -> Optional[MCPManager]:
+    """Boot Tavily MCP + Filesystem MCP. Returns None if neither came up."""
+    mcp = MCPManager()
+    mcp.start()
+    any_up = False
+
+    base_env = {**os.environ}
+
+    try:
+        tools = mcp.add_server(
+            name="tavily",
+            command="npx",
+            args=["-y", "tavily-mcp@latest"],
+            env={**base_env, "TAVILY_API_KEY": tavily_key},
+            timeout=60.0,
+        )
+        any_up = True
+        on_event("mcp_status", {"server": "tavily", "status": "ready", "tools": [t["name"] for t in tools]})
+    except Exception as e:
+        log.warning("Tavily MCP did not start: %s", e)
+        on_event("mcp_status", {"server": "tavily", "status": "error", "message": str(e)})
+
+    try:
+        tools = mcp.add_server(
+            name="fs",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", PLANS_DIR],
+            env=base_env,
+            timeout=60.0,
+        )
+        any_up = True
+        on_event("mcp_status", {"server": "fs", "status": "ready", "tools": [t["name"] for t in tools]})
+    except Exception as e:
+        log.warning("Filesystem MCP did not start: %s", e)
+        on_event("mcp_status", {"server": "fs", "status": "error", "message": str(e)})
+
+    if not any_up:
+        mcp.close()
+        return None
+    return mcp
+
+
+def _save_plan(
+    *,
+    mcp: Optional[MCPManager],
+    user_query: str,
+    prefs: dict,
+    plan: str,
+    on_event: EventCallback,
+) -> Optional[str]:
+    """Save plan + metadata as JSON. Prefers Filesystem MCP, falls back to direct write."""
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    slug = re.sub(r"[^a-z0-9]+", "-", user_query.lower())[:40].strip("-") or "trip"
+    filename = f"{ts}-{slug}.json"
+    payload = json.dumps(
+        {"created_at": ts, "query": user_query, "prefs": prefs, "plan": plan},
+        indent=2,
+    )
+
+    full_path = os.path.join(PLANS_DIR, filename)
+
+    if mcp is not None and mcp.has_server("fs"):
+        try:
+            mcp.call_tool("fs", "write_file", {"path": full_path, "content": payload}, timeout=15)
+            on_event("plan_saved", {"path": full_path, "via": "mcp"})
+            return full_path
+        except Exception as e:
+            log.warning("Filesystem MCP write failed, falling back: %s", e)
+
+    try:
+        with open(full_path, "w") as f:
+            f.write(payload)
+        on_event("plan_saved", {"path": full_path, "via": "direct"})
+        return full_path
+    except Exception as e:
+        log.warning("plan save failed entirely: %s", e)
+        return None

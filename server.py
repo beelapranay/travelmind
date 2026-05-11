@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import threading
 from queue import Queue
 from uuid import uuid4
@@ -14,7 +15,7 @@ from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from agent import run_planner
+from agent import run_planner, PLANS_DIR
 
 app = FastAPI(title="TravelMind")
 
@@ -60,9 +61,9 @@ async def plan(req: PlanRequest):
         _JOBS[job_id] = {"event": prefs_event, "prefs": prefs_holder}
 
     def on_event(event_type: str, payload: dict):
-        if event_type in ("prefs_request", "agent_status", "final_plan", "error"):
+        if event_type in ("prefs_request", "agent_status", "final_plan", "error", "mcp_status", "plan_saved"):
             log.info("[%s] event=%s payload=%s", job_id[:8], event_type,
-                     {k: v for k, v in payload.items() if k != "section" and k != "plan"})
+                     {k: v for k, v in payload.items() if k not in ("section", "plan")})
         queue.put((event_type, payload))
 
     def request_prefs(options: dict) -> dict:
@@ -123,6 +124,42 @@ async def submit_prefs(job_id: str, body: PrefsBody):
     job["prefs"]["value"] = body.prefs
     job["event"].set()
     return {"ok": True}
+
+
+@app.get("/api/history")
+async def history():
+    """List saved plans, newest first. Returns metadata only — no plan body."""
+    if not os.path.isdir(PLANS_DIR):
+        return {"plans": []}
+    items = []
+    for fn in os.listdir(PLANS_DIR):
+        if not fn.endswith(".json"):
+            continue
+        path = os.path.join(PLANS_DIR, fn)
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            items.append({
+                "id": fn[:-5],
+                "created_at": data.get("created_at", ""),
+                "query": data.get("query", ""),
+                "prefs": data.get("prefs", {}),
+            })
+        except Exception:
+            continue
+    items.sort(key=lambda x: x["created_at"], reverse=True)
+    return {"plans": items}
+
+
+@app.get("/api/history/{plan_id}")
+async def history_item(plan_id: str):
+    if "/" in plan_id or ".." in plan_id:
+        raise HTTPException(status_code=400, detail="invalid id")
+    path = os.path.join(PLANS_DIR, plan_id + ".json")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="not found")
+    with open(path) as f:
+        return json.load(f)
 
 
 @app.get("/")
