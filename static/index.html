@@ -6,10 +6,10 @@
 <title>TravelMind — AI Travel Planner</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
 <meta name="theme-color" content="#0c0e16" />
-<meta name="description" content="Watch a multi-agent AI plan your trip live — flights, hotels, day-by-day itinerary, all streamed from real web searches." />
+<meta name="description" content="Watch a multi-agent AI plan your trip live — flights, hotels, a day by day itinerary, all streamed from real web searches." />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="stylesheet" href="/static/styles.css" />
@@ -18,8 +18,9 @@ tailwind.config = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
-        display: ['Space Grotesk', 'Inter', 'sans-serif'],
+        sans: ['Manrope', 'system-ui', 'sans-serif'],
+        display: ['Geist', 'Manrope', 'sans-serif'],
+        mono: ['Geist Mono', 'monospace'],
       },
       colors: {
         ink: { 900: '#07080d', 800: '#0c0e16', 700: '#11141f', 600: '#181c2a' },
@@ -42,7 +43,7 @@ tailwind.config = {
   <!-- Header -->
   <header class="flex items-center justify-between gap-3 mb-10 sm:mb-12">
     <div class="flex items-center gap-3 min-w-0">
-      <div class="shrink-0 w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-gradient-to-br from-accent-500 to-cyan-400 flex items-center justify-center font-display font-bold text-lg text-white shadow-glow">
+      <div class="shrink-0 w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-accent-500 flex items-center justify-center font-display font-bold text-lg text-white shadow-glow">
         TM
       </div>
       <div class="min-w-0">
@@ -50,18 +51,17 @@ tailwind.config = {
         <p class="text-xs text-slate-400 -mt-0.5 truncate hidden sm:block">Autonomous AI travel planner</p>
       </div>
     </div>
-    <button id="settingsBtn" class="shrink-0 whitespace-nowrap px-3 sm:px-4 py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm transition inline-flex items-center gap-2">
+    <button id="settingsBtn" class="shrink-0 whitespace-nowrap px-3 py-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/10 text-sm font-semibold transition-all duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] inline-flex items-center gap-2">
       <span class="hidden sm:inline">API Keys</span><span class="sm:hidden">Keys</span>
     </button>
   </header>
 
   <!-- Hero -->
-  <section class="text-center mb-10 sm:mb-12 max-w-3xl mx-auto">
-    <h2 class="font-display text-3xl sm:text-5xl md:text-6xl font-bold leading-tight mb-4">
-      Describe your trip.<br />
-      <span class="bg-gradient-to-r from-accent-500 via-cyan-400 to-pink-400 bg-clip-text text-transparent whitespace-nowrap">We plan it live.</span>
+  <section class="text-center mb-10 sm:mb-12 mx-auto max-w-[680px]">
+    <h2 class="font-display text-3xl sm:text-5xl md:text-6xl font-bold leading-tight mb-4 bg-gradient-to-r from-white to-[#9B9B9B] bg-clip-text text-transparent text-balance">
+      Describe your trip. We plan it live.
     </h2>
-    <p class="text-slate-400 text-base sm:text-lg">
+    <p class="text-slate-400 text-base sm:text-lg text-pretty">
       Watch an AI agent search the web in real time and compose your itinerary.
     </p>
   </section>
@@ -78,7 +78,7 @@ tailwind.config = {
       <label class="trip-option trip-option-input">
         <span class="trip-option-label">From</span>
         <input id="originInput" type="text" placeholder="city (optional)"
-               title="Leave blank for a ground-only trip (no flights)"
+               title="Leave blank for a ground only trip (no flights)"
                class="trip-option-text" autocomplete="off" />
       </label>
       <label class="trip-option">
@@ -104,7 +104,7 @@ tailwind.config = {
       <div id="examples" class="flex gap-2 flex-wrap text-xs flex-1 min-w-0"></div>
       <button
         id="planBtn"
-        class="shrink-0 whitespace-nowrap w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-accent-500 to-cyan-400 text-white font-semibold shadow-glow hover:shadow-glow-lg transition disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
+        class="shrink-0 whitespace-nowrap w-full sm:w-auto px-3 py-2 rounded-xl bg-accent-500 hover:bg-accent-600 text-white text-base font-semibold shadow-glow hover:shadow-glow-lg transition-all duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center justify-center gap-2"
       >
         <span>Plan my trip</span>
       </button>
@@ -155,15 +155,15 @@ tailwind.config = {
   <!-- Stats -->
   <section id="stats" class="hidden grid grid-cols-3 gap-4 max-w-3xl mx-auto mb-12">
     <div class="glass rounded-xl p-4 text-center">
-      <div class="text-2xl font-bold text-accent-500" id="statSearches">0</div>
+      <div class="font-mono text-2xl font-bold text-accent-500" id="statSearches">0</div>
       <div class="text-xs text-slate-400 uppercase tracking-wider mt-1">Searches</div>
     </div>
     <div class="glass rounded-xl p-4 text-center">
-      <div class="text-2xl font-bold text-cyan-400" id="statSources">0</div>
+      <div class="font-mono text-2xl font-bold text-cyan-400" id="statSources">0</div>
       <div class="text-xs text-slate-400 uppercase tracking-wider mt-1">Sources</div>
     </div>
     <div class="glass rounded-xl p-4 text-center">
-      <div class="text-2xl font-bold text-pink-400" id="statTime">—</div>
+      <div class="font-mono text-2xl font-bold text-pink-400" id="statTime">—</div>
       <div class="text-xs text-slate-400 uppercase tracking-wider mt-1">Seconds</div>
     </div>
   </section>
@@ -205,7 +205,7 @@ tailwind.config = {
     <input id="gmapsKey" type="password" placeholder="AIza... (skip if you don't have one)" class="w-full bg-ink-700 border border-white/10 rounded-lg px-4 py-2.5 mb-2 outline-none focus:border-accent-500" />
     <a href="https://console.cloud.google.com/google/maps-apis/credentials" target="_blank" class="text-xs text-accent-500 hover:underline mb-6 block">Get a Google Maps key</a>
 
-    <button id="closeSettingsBtn" class="w-full py-3 rounded-xl bg-gradient-to-r from-accent-500 to-cyan-400 text-white font-semibold">
+    <button id="closeSettingsBtn" class="w-full py-2 px-3 rounded-xl bg-accent-500 hover:bg-accent-600 text-white text-base font-semibold transition-all duration-200 ease-[cubic-bezier(0.32,0.72,0,1)]">
       Done
     </button>
   </div>

@@ -175,6 +175,13 @@ async def root():
     return FileResponse("static/index.html")
 
 
+@app.get("/favicon.ico")
+@app.get("/favicon.svg")
+async def favicon():
+    """Some browsers probe /favicon.ico at the root regardless of <link> tags."""
+    return FileResponse("static/favicon.svg", media_type="image/svg+xml")
+
+
 @app.get("/p/{plan_id}")
 async def shared_plan_page(plan_id: str):
     """Public share route. Returns the SPA; client-side JS fetches the plan."""
